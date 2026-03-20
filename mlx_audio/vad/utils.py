@@ -3,9 +3,8 @@ from typing import Union
 
 import mlx.nn as nn
 
+from .registry import MODEL_REMAPPING
 from mlx_audio.utils import base_load_model
-
-MODEL_REMAPPING = {}
 
 
 def load_model(

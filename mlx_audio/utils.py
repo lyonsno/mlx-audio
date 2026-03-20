@@ -6,26 +6,20 @@ with lazy imports to avoid loading unnecessary dependencies.
 
 import dataclasses
 import glob
-import importlib
-import importlib.util
 import json
-import logging
 from pathlib import Path
-from typing import (
-    List,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-    get_origin,
-    get_type_hints,
-)
+from typing import List, Optional, Type, TypeVar, Union, get_origin, get_type_hints
 
 import mlx.core as mx
 import mlx.nn as nn
 from huggingface_hub import snapshot_download
 
+from mlx_audio.model_routing import (
+    get_model_category,
+    get_model_class,
+    get_model_name_parts,
+    is_valid_module_name,
+)
 from mlx_audio.dsp import (
     STR_TO_WINDOW_FN,
     bartlett,
@@ -250,70 +244,6 @@ def apply_quantization(
         mode=quantization.get("mode", "affine"),
         class_predicate=get_class_predicate,
     )
-
-
-def get_model_class(
-    model_type: str,
-    model_name: List[str],
-    category: str,
-    model_remapping: dict,
-) -> Tuple:
-    """
-    Retrieve the model architecture module based on the model type and name.
-
-    Args:
-        model_type: The type of model to load (e.g., "whisper", "voxtral").
-        model_name: List of model name components for remapping hints.
-        category: Either "tts" or "stt".
-        model_remapping: Dictionary mapping model names to architecture names.
-
-    Returns:
-        Tuple[module, str]: The imported architecture module and resolved model_type.
-
-    Raises:
-        ValueError: If the model type is not supported.
-    """
-    # Stage 1: Check if the model type is in the remapping
-    model_type_mapped = model_remapping.get(model_type, None)
-
-    # Stage 2: Check for partial matches in segments of the model name
-    # Only do this if the initial mapping didn't find a match
-    models_dir = Path(__file__).parent / category / "models"
-    available_models = []
-    if models_dir.exists() and models_dir.is_dir():
-        for item in models_dir.iterdir():
-            if item.is_dir() and not item.name.startswith("__"):
-                available_models.append(item.name)
-
-    if model_name is not None and model_type_mapped != model_type:
-        for part in model_name:
-            if part in available_models:
-                model_type = part
-            if part in model_remapping:
-                model_type = model_remapping[part]
-                break
-    elif model_type_mapped is not None:
-        model_type = model_type_mapped
-
-    try:
-        module_path = f"mlx_audio.{category}.models.{model_type}"
-        arch = importlib.import_module(module_path)
-    except ImportError as e:
-        if e.name != module_path:
-            print("\n", flush=True)
-
-            raise ImportError(
-                f"\nMissing dependency while loading {model_type}: {e}\n"
-                f"Please install it using: pip install {e.name}"
-            ) from e
-
-        msg = f"Model type {model_type} not supported for {category}."
-        logging.error(msg)
-        raise ValueError(msg)
-
-    return arch, model_type
-
-
 def base_load_model(
     model_path: Union[str, Path],
     category: str,
@@ -620,64 +550,6 @@ __all__ = [
 ]
 
 
-def is_valid_module_name(name: str) -> bool:
-    """Check if a string is a valid Python module name."""
-    if not name or not isinstance(name, str):
-        return False
-
-    return name[0].isalpha() or name[0] == "_"
-
-
-def get_model_category(model_type: str, model_name: List[str]) -> Optional[str]:
-    """Determine whether a model belongs to the TTS, STT, LID, or VAD category."""
-    stt_utils = _get_stt_utils()
-    tts_utils = _get_tts_utils()
-    vad_utils = _get_vad_utils()
-    lid_utils = _get_lid_utils()
-
-    candidates = [model_type] + (model_name or [])
-
-    categories = [
-        ("tts", tts_utils.MODEL_REMAPPING),
-        ("stt", stt_utils.MODEL_REMAPPING),
-        ("lid", lid_utils.MODEL_REMAPPING),
-        ("vad", vad_utils.MODEL_REMAPPING),
-    ]
-
-    # First pass: check for explicit remapping matches (higher priority)
-    for category, remap in categories:
-        for hint in candidates:
-            if hint in remap:
-                arch = remap[hint]
-                if not is_valid_module_name(arch):
-                    continue
-                module_path = f"mlx_audio.{category}.models.{arch}"
-                if importlib.util.find_spec(module_path) is not None:
-                    return category
-
-    # Second pass: check for direct module matches (fallback)
-    for category, remap in categories:
-        for hint in candidates:
-            if hint not in remap and is_valid_module_name(hint):
-                module_path = f"mlx_audio.{category}.models.{hint}"
-                if importlib.util.find_spec(module_path) is not None:
-                    return category
-
-    return None
-
-
-def get_model_name_parts(model_path: Union[str, Path]) -> str:
-    model_name = None
-    if isinstance(model_path, str):
-        model_name = model_path.lower().split("/")[-1].split("-")
-    elif isinstance(model_path, Path):
-        index = model_path.parts.index("hub")
-        model_name = model_path.parts[index + 1].lower().split("--")[-1].split("-")
-    else:
-        raise ValueError(f"Invalid model path type: {type(model_path)}")
-    return model_name
-
-
 def load_model(model_name: str):
     """Load a TTS, STT, LID, or VAD model based on its configuration and name.
 
@@ -701,6 +573,20 @@ def load_model(model_name: str):
     # Try to determine model type from config first, then from name
     model_type = config.get("model_type", None)
     model_category = get_model_category(model_type, model_name_parts)
+
+    # Generic local folder names can hide LID repo-name hints for wav2vec2-based
+    # checkpoints, so fall back to config-only LID markers before giving up.
+    if (
+        model_category is None
+        and model_type == "wav2vec2"
+        and (
+            "classifier_proj_size" in config
+            or "id2label" in config
+            or "Wav2Vec2ForSequenceClassification"
+            in config.get("architectures", [])
+        )
+    ):
+        model_category = "lid"
 
     if not model_category:
         raise ValueError(f"Could not determine model type for {model_name}")

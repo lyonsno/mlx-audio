@@ -3,14 +3,10 @@ from typing import Optional, Union
 
 import mlx.nn as nn
 
+from .registry import MODEL_REMAPPING
 from mlx_audio.utils import base_load_model
 
 SAMPLE_RATE = 16000
-
-MODEL_REMAPPING = {
-    "ecapa-tdnn": "ecapa_tdnn",
-    "ecapa_tdnn": "ecapa_tdnn",
-}
 
 
 def load_model(

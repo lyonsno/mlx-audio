@@ -9,29 +9,13 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from .registry import MODEL_REMAPPING
 from mlx_audio.utils import (
     base_load_model,
     get_model_class,
     get_model_path,
     load_config,
 )
-
-MODEL_REMAPPING = {
-    "qwen3_tts": "qwen3_tts",
-    "outetts": "outetts",
-    "spark": "spark",
-    "marvis": "sesame",
-    "csm": "sesame",
-    "voxcpm": "voxcpm",
-    "voxcpm1.5": "voxcpm",
-    "vibevoice_streaming": "vibevoice",
-    "chatterbox_turbo": "chatterbox_turbo",
-    "soprano": "soprano",
-    "bailingmm": "bailingmm",
-    "kitten": "kitten_tts",
-    "echo_tts": "echo_tts",
-    "fish_qwen3_omni": "fish_qwen3_omni",
-}
 MAX_FILE_SIZE_GB = 5
 MODEL_CONVERSION_DTYPES = ["float16", "bfloat16", "float32"]
 

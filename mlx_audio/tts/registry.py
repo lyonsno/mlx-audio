@@ -1,0 +1,16 @@
+MODEL_REMAPPING = {
+    "qwen3_tts": "qwen3_tts",
+    "outetts": "outetts",
+    "spark": "spark",
+    "marvis": "sesame",
+    "csm": "sesame",
+    "voxcpm": "voxcpm",
+    "voxcpm1.5": "voxcpm",
+    "vibevoice_streaming": "vibevoice",
+    "chatterbox_turbo": "chatterbox_turbo",
+    "soprano": "soprano",
+    "bailingmm": "bailingmm",
+    "kitten": "kitten_tts",
+    "echo_tts": "echo_tts",
+    "fish_qwen3_omni": "fish_qwen3_omni",
+}

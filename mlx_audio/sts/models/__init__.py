@@ -1,30 +1,6 @@
 # Copyright (c) 2025 Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
 
-from .deepfilternet import (
-    DeepFilterNet2Config,
-    DeepFilterNet3Config,
-    DeepFilterNetConfig,
-    DeepFilterNetModel,
-    DeepFilterNetStreamer,
-    DeepFilterNetStreamingConfig,
-)
-from .lfm_audio import (
-    ChatState,
-    GenerationConfig,
-    LFM2AudioConfig,
-    LFM2AudioModel,
-    LFM2AudioProcessor,
-    LFMModality,
-)
-from .mossformer2_se import MossFormer2SE, MossFormer2SEConfig, MossFormer2SEModel
-from .sam_audio import (
-    Batch,
-    SAMAudio,
-    SAMAudioConfig,
-    SAMAudioProcessor,
-    SeparationResult,
-    save_audio,
-)
+import importlib
 
 __all__ = [
     "SAMAudio",
@@ -52,3 +28,36 @@ __all__ = [
     "ChatState",
     "GenerationConfig",
 ]
+
+_EXPORTS = {
+    "DeepFilterNetModel": ("deepfilternet", "DeepFilterNetModel"),
+    "DeepFilterNetConfig": ("deepfilternet", "DeepFilterNetConfig"),
+    "DeepFilterNet2Config": ("deepfilternet", "DeepFilterNet2Config"),
+    "DeepFilterNet3Config": ("deepfilternet", "DeepFilterNet3Config"),
+    "DeepFilterNetStreamer": ("deepfilternet", "DeepFilterNetStreamer"),
+    "DeepFilterNetStreamingConfig": ("deepfilternet", "DeepFilterNetStreamingConfig"),
+    "MossFormer2SE": ("mossformer2_se", "MossFormer2SE"),
+    "MossFormer2SEConfig": ("mossformer2_se", "MossFormer2SEConfig"),
+    "MossFormer2SEModel": ("mossformer2_se", "MossFormer2SEModel"),
+    "SAMAudio": ("sam_audio", "SAMAudio"),
+    "SAMAudioProcessor": ("sam_audio", "SAMAudioProcessor"),
+    "SeparationResult": ("sam_audio", "SeparationResult"),
+    "Batch": ("sam_audio", "Batch"),
+    "save_audio": ("sam_audio", "save_audio"),
+    "SAMAudioConfig": ("sam_audio", "SAMAudioConfig"),
+    "LFM2AudioModel": ("lfm_audio", "LFM2AudioModel"),
+    "LFM2AudioProcessor": ("lfm_audio", "LFM2AudioProcessor"),
+    "LFM2AudioConfig": ("lfm_audio", "LFM2AudioConfig"),
+    "LFMModality": ("lfm_audio", "LFMModality"),
+    "ChatState": ("lfm_audio", "ChatState"),
+    "GenerationConfig": ("lfm_audio", "GenerationConfig"),
+}
+
+
+def __getattr__(name):
+    if name in _EXPORTS:
+        module_name, attr_name = _EXPORTS[name]
+        module = importlib.import_module(f"{__name__}.{module_name}")
+        return getattr(module, attr_name)
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
