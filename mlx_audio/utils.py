@@ -574,19 +574,17 @@ def load_model(model_name: str):
     model_type = config.get("model_type", None)
     model_category = get_model_category(model_type, model_name_parts)
 
-    # Generic local folder names can hide LID repo-name hints for wav2vec2-based
-    # checkpoints, so fall back to config-only LID markers before giving up.
-    if (
-        model_category is None
-        and model_type == "wav2vec2"
-        and (
-            "classifier_proj_size" in config
-            or "id2label" in config
-            or "Wav2Vec2ForSequenceClassification"
-            in config.get("architectures", [])
-        )
-    ):
-        model_category = "lid"
+    # wav2vec2-based LID checkpoints can look generic on disk. Respect an
+    # explicit sequence-classification architecture first, and only fall back
+    # to config-only LID markers when name-based routing could not decide.
+    architectures = set(config.get("architectures", []))
+    if model_type == "wav2vec2":
+        if "Wav2Vec2ForSequenceClassification" in architectures:
+            model_category = "lid"
+        elif model_category is None and (
+            "classifier_proj_size" in config or "id2label" in config
+        ):
+            model_category = "lid"
 
     if not model_category:
         raise ValueError(f"Could not determine model type for {model_name}")

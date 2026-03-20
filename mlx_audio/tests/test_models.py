@@ -203,6 +203,84 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             """
         )
 
+    def test_public_top_level_loader_routes_mms_wav2vec2_ctc_config_to_stt(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "wav2vec2",
+                    "architectures": ["Wav2Vec2ForCTC"],
+                    "classifier_proj_size": 256,
+                    "id2label": {"0": "<pad>", "1": "a"},
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/mms-generic-model")
+
+            assert loaded == ("stt", "/tmp/mms-generic-model"), loaded
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_prefers_lid_sequence_classification_over_mms_hint(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "wav2vec2",
+                    "architectures": ["Wav2Vec2ForSequenceClassification"],
+                    "classifier_proj_size": 256,
+                    "id2label": {"en": "English"},
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/mms-seqcls-generic-model")
+
+            assert loaded == ("lid", "/tmp/mms-seqcls-generic-model"), loaded
+            print("OK")
+            """
+        )
+
     def test_public_tts_loader_uses_shared_runtime_routing(self):
         self.run_in_subprocess_with_fake_mlx(
             """
@@ -264,6 +342,139 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             assert model.loaded_weights[0][0] == "weight"
             assert model.eval_called is True
             import_module.assert_called_once_with("mlx_audio.tts.models.qwen3_tts")
+            print("OK")
+            """
+        )
+
+    def test_public_tts_loader_resolves_documented_alias_model_types(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            from mlx_audio.tts.utils import load_model
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "resolved_model_type": config["model_type"],
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            configs = {
+                "Ming-omni-tts-16.8B-A3B-bf16": {
+                    "model_type": "ming_omni_tts",
+                },
+                "fish-audio-s2-pro": {
+                    "model_type": "fish_speech",
+                },
+            }
+            expected_module_paths = [
+                "mlx_audio.tts.models.bailingmm",
+                "mlx_audio.tts.models.fish_qwen3_omni",
+            ]
+
+            def import_side_effect(name):
+                if name in expected_module_paths:
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda model_path: configs[Path(model_path).name],
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                ming = load_model(
+                    Path("/tmp/Ming-omni-tts-16.8B-A3B-bf16"),
+                    lazy=False,
+                    strict=True,
+                )
+                fish = load_model(Path("/tmp/fish-audio-s2-pro"), lazy=False, strict=True)
+
+            assert isinstance(ming, DummyModel)
+            assert isinstance(fish, DummyModel)
+            assert ming.config["resolved_model_type"] == "ming_omni_tts"
+            assert fish.config["resolved_model_type"] == "fish_speech"
+            assert ming.strict is True
+            assert fish.strict is True
+            assert ming.eval_called is True
+            assert fish.eval_called is True
+            assert [call.args[0] for call in import_module.call_args_list] == expected_module_paths
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_routes_documented_tts_model_types(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            configs = {
+                "mlx-community/Ming-omni-tts-16.8B-A3B-bf16": {
+                    "model_type": "ming_omni_tts",
+                },
+                "mlx-community/fish-audio-s2-pro": {
+                    "model_type": "fish_speech",
+                },
+            }
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda model_name: configs[model_name],
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                ming = utils.load_model("mlx-community/Ming-omni-tts-16.8B-A3B-bf16")
+                fish = utils.load_model("mlx-community/fish-audio-s2-pro")
+
+            assert ming == ("tts", "mlx-community/Ming-omni-tts-16.8B-A3B-bf16")
+            assert fish == ("tts", "mlx-community/fish-audio-s2-pro")
             print("OK")
             """
         )

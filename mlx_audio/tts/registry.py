@@ -10,7 +10,9 @@ MODEL_REMAPPING = {
     "chatterbox_turbo": "chatterbox_turbo",
     "soprano": "soprano",
     "bailingmm": "bailingmm",
+    "ming_omni_tts": "bailingmm",
     "kitten": "kitten_tts",
     "echo_tts": "echo_tts",
     "fish_qwen3_omni": "fish_qwen3_omni",
+    "fish_speech": "fish_qwen3_omni",
 }

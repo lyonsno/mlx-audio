@@ -107,16 +107,24 @@ def get_model_class(
     """Retrieve the architecture module for a resolved category/model family."""
     model_type_mapped = model_remapping.get(model_type, None)
     available_models = _get_available_models(category)
+    resolved_model_type = model_type
 
     if model_name is not None and model_type_mapped != model_type:
+        matched_from_name = False
         for part in model_name:
             if part in available_models:
-                model_type = part
+                resolved_model_type = part
+                matched_from_name = True
             if part in model_remapping:
-                model_type = model_remapping[part]
+                resolved_model_type = model_remapping[part]
+                matched_from_name = True
                 break
+        if not matched_from_name and model_type_mapped is not None:
+            resolved_model_type = model_type_mapped
     elif model_type_mapped is not None:
-        model_type = model_type_mapped
+        resolved_model_type = model_type_mapped
+
+    model_type = resolved_model_type
 
     try:
         module_path = f"mlx_audio.{category}.models.{model_type}"
