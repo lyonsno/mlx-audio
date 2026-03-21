@@ -109,20 +109,16 @@ def get_model_class(
     available_models = _get_available_models(category)
     resolved_model_type = model_type
 
-    if model_name is not None and model_type_mapped != model_type:
-        matched_from_name = False
+    # An explicit model_type from config should win over path heuristics.
+    if model_type_mapped is not None:
+        resolved_model_type = model_type_mapped
+    elif model_name is not None:
         for part in model_name:
             if part in available_models:
                 resolved_model_type = part
-                matched_from_name = True
             if part in model_remapping:
                 resolved_model_type = model_remapping[part]
-                matched_from_name = True
                 break
-        if not matched_from_name and model_type_mapped is not None:
-            resolved_model_type = model_type_mapped
-    elif model_type_mapped is not None:
-        resolved_model_type = model_type_mapped
 
     model_type = resolved_model_type
 

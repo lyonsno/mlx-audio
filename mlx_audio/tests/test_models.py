@@ -165,6 +165,66 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             """
         )
 
+    def test_get_model_class_prefers_explicit_alias_over_unrelated_path_tokens(self):
+        self.run_in_subprocess(
+            """
+            from unittest.mock import patch
+
+            from mlx_audio.model_routing import get_model_class
+            from mlx_audio.tts.registry import MODEL_REMAPPING as TTS_MODEL_REMAPPING
+
+            sentinel_module = object()
+
+            with patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                return_value=sentinel_module,
+            ) as import_module:
+                arch, resolved_model_type = get_model_class(
+                    model_type="fish_speech",
+                    model_name=["spark", "fish", "audio", "s2", "pro"],
+                    category="tts",
+                    model_remapping=TTS_MODEL_REMAPPING,
+                )
+
+            assert arch is sentinel_module
+            assert resolved_model_type == "fish_qwen3_omni"
+            import_module.assert_called_once_with(
+                "mlx_audio.tts.models.fish_qwen3_omni"
+            )
+            print("OK")
+            """
+        )
+
+    def test_get_model_class_prefers_explicit_stt_alias_over_unrelated_path_tokens(self):
+        self.run_in_subprocess(
+            """
+            from unittest.mock import patch
+
+            from mlx_audio.model_routing import get_model_class
+            from mlx_audio.stt.registry import MODEL_REMAPPING as STT_MODEL_REMAPPING
+
+            sentinel_module = object()
+
+            with patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                return_value=sentinel_module,
+            ) as import_module:
+                arch, resolved_model_type = get_model_class(
+                    model_type="vibevoice",
+                    model_name=["sensevoice", "vibevoice", "small"],
+                    category="stt",
+                    model_remapping=STT_MODEL_REMAPPING,
+                )
+
+            assert arch is sentinel_module
+            assert resolved_model_type == "vibevoice_asr"
+            import_module.assert_called_once_with(
+                "mlx_audio.stt.models.vibevoice_asr"
+            )
+            print("OK")
+            """
+        )
+
     def test_public_top_level_loader_routes_generic_local_lid_wav2vec2_config(self):
         self.run_in_subprocess_with_fake_mlx(
             """
@@ -475,6 +535,45 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
 
             assert ming == ("tts", "mlx-community/Ming-omni-tts-16.8B-A3B-bf16")
             assert fish == ("tts", "mlx-community/fish-audio-s2-pro")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_tolerates_null_architectures_for_resolved_model_type(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "qwen3_tts",
+                    "architectures": None,
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/qwen3-tts")
+
+            assert loaded == ("tts", "/tmp/qwen3-tts"), loaded
             print("OK")
             """
         )

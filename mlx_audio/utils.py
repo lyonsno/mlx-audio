@@ -577,7 +577,7 @@ def load_model(model_name: str):
     # wav2vec2-based LID checkpoints can look generic on disk. Respect an
     # explicit sequence-classification architecture first, and only fall back
     # to config-only LID markers when name-based routing could not decide.
-    architectures = set(config.get("architectures", []))
+    architectures = set(config.get("architectures") or [])
     if model_type == "wav2vec2":
         if "Wav2Vec2ForSequenceClassification" in architectures:
             model_category = "lid"
