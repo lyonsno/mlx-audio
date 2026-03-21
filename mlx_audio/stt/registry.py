@@ -1,4 +1,5 @@
 MODEL_REMAPPING = {
+    "GraniteSpeechForConditionalGeneration": "granite_speech",
     "fireredasr2": "fireredasr2",
     "glm": "glmasr",
     "sensevoice": "sensevoice",

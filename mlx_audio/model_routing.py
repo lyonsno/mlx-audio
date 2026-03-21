@@ -10,6 +10,8 @@ from mlx_audio.stt.registry import MODEL_REMAPPING as STT_MODEL_REMAPPING
 from mlx_audio.tts.registry import MODEL_REMAPPING as TTS_MODEL_REMAPPING
 from mlx_audio.vad.registry import MODEL_REMAPPING as VAD_MODEL_REMAPPING
 
+GENERIC_TTS_BACKBONE_MODEL_TYPES = {"llama", "qwen2", "qwen3"}
+
 
 def is_valid_module_name(name: str) -> bool:
     """Check if a string is a valid Python module name."""
@@ -109,19 +111,31 @@ def get_model_class(
     model_type_mapped = model_remapping.get(model_type, None)
     available_models = _get_available_models(category)
     resolved_model_type = None
+    path_resolved_model_type = None
+
+    if model_name is not None:
+        for part in model_name:
+            if part in available_models:
+                path_resolved_model_type = part
+            if part in model_remapping:
+                path_resolved_model_type = model_remapping[part]
+                break
 
     # A supported model_type from config should win over path heuristics.
     if model_type_mapped is not None:
         resolved_model_type = model_type_mapped
+    elif (
+        category == "tts"
+        and model_type in GENERIC_TTS_BACKBONE_MODEL_TYPES
+        and path_resolved_model_type not in {None, model_type}
+    ):
+        # Wrapper checkpoints like OuteTTS keep an inner LLM model_type in
+        # config, so the repo-name hint needs to win over the generic backbone.
+        resolved_model_type = path_resolved_model_type
     elif model_type in available_models:
         resolved_model_type = model_type
-    elif model_name is not None:
-        for part in model_name:
-            if part in available_models:
-                resolved_model_type = part
-            if part in model_remapping:
-                resolved_model_type = model_remapping[part]
-                break
+    elif path_resolved_model_type is not None:
+        resolved_model_type = path_resolved_model_type
 
     if resolved_model_type is None:
         resolved_model_type = fallback_model_type or model_type

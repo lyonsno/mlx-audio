@@ -625,7 +625,10 @@ def load_model(model_name: str):
         elif (
             not architectures
             and model_category is None
-            and "classifier_proj_size" in config
+            and (
+                "classifier_proj_size" in config
+                or "num_labels" in config
+            )
         ):
             model_category = "lid"
 

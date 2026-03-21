@@ -1,1 +1,3 @@
-MODEL_REMAPPING = {}
+MODEL_REMAPPING = {
+    "SortformerOffline": "sortformer",
+}
