@@ -622,8 +622,10 @@ def load_model(model_name: str):
             model_category = "lid"
         elif "Wav2Vec2ForCTC" in architectures:
             model_category = "stt"
-        elif not architectures and model_category is None and (
-            "classifier_proj_size" in config or "id2label" in config
+        elif (
+            not architectures
+            and model_category is None
+            and "classifier_proj_size" in config
         ):
             model_category = "lid"
 

@@ -53,8 +53,18 @@ _EXPORTS = {
     "GenerationConfig": ("lfm_audio", "GenerationConfig"),
 }
 
+_SUBMODULES = {
+    "deepfilternet",
+    "sam_audio",
+    "lfm_audio",
+    "mossformer2_se",
+}
+
 
 def __getattr__(name):
+    if name in _SUBMODULES:
+        return importlib.import_module(f"{__name__}.{name}")
+
     if name in _EXPORTS:
         module_name, attr_name = _EXPORTS[name]
         module = importlib.import_module(f"{__name__}.{module_name}")

@@ -56,8 +56,9 @@ def _is_missing_voice_pipeline_optional_dep(exc: ImportError) -> bool:
     if not missing_name:
         return False
 
+    normalized_name = missing_name.lstrip("_")
     return any(
-        missing_name == dep or missing_name.startswith(f"{dep}.")
+        normalized_name == dep or normalized_name.startswith(f"{dep}.")
         for dep in _OPTIONAL_VOICE_PIPELINE_IMPORTS
     )
 

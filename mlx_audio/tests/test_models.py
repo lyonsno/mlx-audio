@@ -147,6 +147,37 @@ class TestPackageCompatibility(SmokeSubprocessTestCase):
             """
         )
 
+    def test_sts_models_subpackages_remain_available_as_attributes(self):
+        self.run_in_subprocess(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.sts as sts
+
+            models = sts.models
+            sentinel_modules = {
+                "mlx_audio.sts.models.deepfilternet": SimpleNamespace(),
+                "mlx_audio.sts.models.sam_audio": SimpleNamespace(),
+                "mlx_audio.sts.models.lfm_audio": SimpleNamespace(),
+                "mlx_audio.sts.models.mossformer2_se": SimpleNamespace(),
+            }
+
+            def import_side_effect(name, *args, **kwargs):
+                if name in sentinel_modules:
+                    return sentinel_modules[name]
+                raise AssertionError(f"unexpected module import: {name}")
+
+            with patch("mlx_audio.sts.models.importlib.import_module", side_effect=import_side_effect):
+                assert models.deepfilternet is sentinel_modules["mlx_audio.sts.models.deepfilternet"]
+                assert models.sam_audio is sentinel_modules["mlx_audio.sts.models.sam_audio"]
+                assert models.lfm_audio is sentinel_modules["mlx_audio.sts.models.lfm_audio"]
+                assert models.mossformer2_se is sentinel_modules["mlx_audio.sts.models.mossformer2_se"]
+
+            print("OK")
+            """
+        )
+
 
 class TestModelClassRouting(SmokeSubprocessTestCase):
     def test_get_model_class_resolves_representative_tts_family(self):
@@ -299,6 +330,90 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
                 loaded = utils.load_model("/tmp/generic-model")
 
             assert loaded == ("lid", "/tmp/generic-model")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_routes_generic_local_lid_wav2vec2_config_without_id2label(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "wav2vec2",
+                    "classifier_proj_size": 256,
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/generic-model")
+
+            assert loaded == ("lid", "/tmp/generic-model"), loaded
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_does_not_treat_generic_wav2vec2_id2label_config_as_lid(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "wav2vec2",
+                    "id2label": {"0": "<pad>", "1": "a"},
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                try:
+                    utils.load_model("/tmp/generic-model")
+                except ValueError as exc:
+                    assert str(exc) == "Could not determine model type for /tmp/generic-model"
+                else:
+                    raise AssertionError(
+                        "generic wav2vec2 config with only id2label should not route to lid"
+                    )
+
             print("OK")
             """
         )
@@ -1264,6 +1379,29 @@ class TestPublicStsStructuralSmoke(SmokeSubprocessTestCase):
             from mlx_audio.sts import VoicePipeline
 
             assert VoicePipeline is None
+            print("OK")
+            """
+        )
+
+    def test_public_sts_voice_pipeline_stays_optional_for_missing_compiled_extension_deps(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from unittest.mock import patch
+
+            import mlx_audio.sts as sts
+
+            real_import_module = sts.importlib.import_module
+
+            def guarded_import(name, *args, **kwargs):
+                if name == "mlx_audio.sts.voice_pipeline":
+                    raise ImportError("blocked compiled extension", name="_webrtcvad")
+                return real_import_module(name, *args, **kwargs)
+
+            with patch("mlx_audio.sts.importlib.import_module", side_effect=guarded_import):
+                assert sts.VoicePipeline is None
+
             print("OK")
             """
         )
