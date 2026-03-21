@@ -198,6 +198,39 @@ def load_weights(model_path: Path) -> dict:
     return weights
 
 
+def _get_declared_architectures(config: dict) -> set[str]:
+    """Return any declared architecture names from singular or plural config fields."""
+    architectures = set()
+
+    declared_architectures = config.get("architectures")
+    if isinstance(declared_architectures, str):
+        architectures.add(declared_architectures)
+    elif declared_architectures is not None:
+        architectures.update(declared_architectures)
+
+    architecture = config.get("architecture")
+    if architecture is not None:
+        architectures.add(architecture)
+
+    return architectures
+
+
+def _get_config_model_type(config: dict) -> Optional[str]:
+    """Return the model type declared in config, normalizing wav2vec2 head names."""
+    model_type = config.get("model_type")
+    if model_type is not None:
+        return model_type
+
+    architectures = _get_declared_architectures(config)
+    if (
+        "Wav2Vec2ForCTC" in architectures
+        or "Wav2Vec2ForSequenceClassification" in architectures
+    ):
+        return "wav2vec2"
+
+    return config.get("architecture")
+
+
 def apply_quantization(
     model: nn.Module,
     config: dict,
@@ -289,11 +322,17 @@ def base_load_model(
     config["model_path"] = str(model_path)
 
     # Determine model_type from config or model_name
-    model_type = config.get("model_type", None)
-    if model_type is None:
-        model_type = config.get("architecture", None)
+    model_type = _get_config_model_type(config)
     if model_type is None:
         model_type = model_name[0].lower() if model_name is not None else None
+
+    architectures = _get_declared_architectures(config)
+    if (
+        category == "stt"
+        and model_type == "wav2vec2"
+        and "Wav2Vec2ForCTC" in architectures
+    ):
+        model_type = "mms"
 
     model_class, model_type = get_model_class(
         model_type=model_type,
@@ -571,17 +610,19 @@ def load_model(model_name: str):
     model_name_parts = get_model_name_parts(model_name)
 
     # Try to determine model type from config first, then from name
-    model_type = config.get("model_type", None)
+    model_type = _get_config_model_type(config)
     model_category = get_model_category(model_type, model_name_parts)
 
-    # wav2vec2-based LID checkpoints can look generic on disk. Respect an
-    # explicit sequence-classification architecture first, and only fall back
-    # to config-only LID markers when name-based routing could not decide.
-    architectures = set(config.get("architectures") or [])
+    # wav2vec2-based checkpoints often need architecture help: explicit CTC and
+    # sequence-classification heads should override name hints, while generic
+    # config-only LID markers are only a fallback when no architecture is set.
+    architectures = _get_declared_architectures(config)
     if model_type == "wav2vec2":
         if "Wav2Vec2ForSequenceClassification" in architectures:
             model_category = "lid"
-        elif model_category is None and (
+        elif "Wav2Vec2ForCTC" in architectures:
+            model_category = "stt"
+        elif not architectures and model_category is None and (
             "classifier_proj_size" in config or "id2label" in config
         ):
             model_category = "lid"

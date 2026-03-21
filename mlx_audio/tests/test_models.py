@@ -28,10 +28,22 @@ fake_mlx.core = fake_mx
 fake_mlx.nn = fake_nn
 fake_mlx.utils = fake_utils
 
+fake_hf_hub = types.ModuleType("huggingface_hub")
+fake_hf_hub.snapshot_download = lambda *_args, **_kwargs: None
+
+fake_np = types.ModuleType("numpy")
+fake_np.ndarray = type("ndarray", (), {})
+fake_np.asarray = lambda value, *_args, **_kwargs: value
+
+fake_tqdm = types.ModuleType("tqdm")
+
 sys.modules.setdefault("mlx", fake_mlx)
 sys.modules.setdefault("mlx.core", fake_mx)
 sys.modules.setdefault("mlx.nn", fake_nn)
 sys.modules.setdefault("mlx.utils", fake_utils)
+sys.modules.setdefault("huggingface_hub", fake_hf_hub)
+sys.modules.setdefault("numpy", fake_np)
+sys.modules.setdefault("tqdm", fake_tqdm)
 """
 
 
@@ -85,7 +97,7 @@ class TestModelCategoryRouting(SmokeSubprocessTestCase):
             assert get_model_category("ecapa_tdnn", ["ecapa", "tdnn"]) == "lid"
             assert get_model_category("vibevoice", ["vibevoice", "asr"]) == "stt"
             assert get_model_category("wav2vec2", ["mms", "lid", "256"]) == "lid"
-            assert get_model_category("wav2vec2", ["wav2vec2", "base"]) != "lid"
+            assert get_model_category("wav2vec2", ["wav2vec2", "base"]) is None
             assert get_model_category("definitely_unknown_model", ["unknown"]) is None
             print("OK")
             """
@@ -225,6 +237,34 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             """
         )
 
+    def test_get_model_class_prefers_explicit_direct_model_type_over_path_tokens(self):
+        self.run_in_subprocess(
+            """
+            from unittest.mock import patch
+
+            from mlx_audio.model_routing import get_model_class
+            from mlx_audio.stt.registry import MODEL_REMAPPING as STT_MODEL_REMAPPING
+
+            sentinel_module = object()
+
+            with patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                return_value=sentinel_module,
+            ) as import_module:
+                arch, resolved_model_type = get_model_class(
+                    model_type="whisper",
+                    model_name=["custom", "moonshine", "checkpoint"],
+                    category="stt",
+                    model_remapping=STT_MODEL_REMAPPING,
+                )
+
+            assert arch is sentinel_module
+            assert resolved_model_type == "whisper"
+            import_module.assert_called_once_with("mlx_audio.stt.models.whisper")
+            print("OK")
+            """
+        )
+
     def test_public_top_level_loader_routes_generic_local_lid_wav2vec2_config(self):
         self.run_in_subprocess_with_fake_mlx(
             """
@@ -259,6 +299,589 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
                 loaded = utils.load_model("/tmp/generic-model")
 
             assert loaded == ("lid", "/tmp/generic-model")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_loads_generic_wav2vec2_ctc_config_via_stt_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config["model_type"],
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "model_type": "wav2vec2",
+                "architectures": ["Wav2Vec2ForCTC"],
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] == "wav2vec2"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_loads_generic_wav2vec2_singular_architecture_ctc_config_via_stt_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config["model_type"],
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "model_type": "wav2vec2",
+                "architecture": "Wav2Vec2ForCTC",
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] == "wav2vec2"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_loads_architecture_only_wav2vec2_ctc_config_via_stt_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architecture": config.get("architecture"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architecture": "Wav2Vec2ForCTC",
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architecture"] == "Wav2Vec2ForCTC"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_prefers_ctc_architecture_over_stt_name_hints(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config["model_type"],
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "model_type": "wav2vec2",
+                "architectures": ["Wav2Vec2ForCTC"],
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/custom-moonshine-checkpoint"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/custom-moonshine-checkpoint")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] == "wav2vec2"
+            assert model.config["model_path"] == "/tmp/custom-moonshine-checkpoint"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_stt_loader_loads_architecture_only_wav2vec2_ctc_config_via_mms_runtime(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architecture": config.get("architecture"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architecture": "Wav2Vec2ForCTC",
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = stt_utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architecture"] == "Wav2Vec2ForCTC"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_prefers_singular_ctc_architecture_over_stt_name_hints(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config["model_type"],
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "model_type": "wav2vec2",
+                "architecture": "Wav2Vec2ForCTC",
+                "classifier_proj_size": 256,
+                "id2label": {"0": "<pad>", "1": "a"},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.mms":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/custom-moonshine-checkpoint"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/custom-moonshine-checkpoint")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] == "wav2vec2"
+            assert model.config["model_path"] == "/tmp/custom-moonshine-checkpoint"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.mms")
             print("OK")
             """
         )
@@ -298,6 +921,45 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
                 loaded = utils.load_model("/tmp/mms-generic-model")
 
             assert loaded == ("stt", "/tmp/mms-generic-model"), loaded
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_prefers_ctc_over_lid_looking_mms_path(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "model_type": "wav2vec2",
+                    "architectures": ["Wav2Vec2ForCTC"],
+                    "classifier_proj_size": 256,
+                    "id2label": {"0": "<pad>", "1": "a"},
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/mms-lid-256")
+
+            assert loaded == ("stt", "/tmp/mms-lid-256"), loaded
             print("OK")
             """
         )

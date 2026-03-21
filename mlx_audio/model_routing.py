@@ -103,15 +103,18 @@ def get_model_class(
     model_name: List[str],
     category: str,
     model_remapping: dict,
+    fallback_model_type: Optional[str] = None,
 ) -> Tuple:
     """Retrieve the architecture module for a resolved category/model family."""
     model_type_mapped = model_remapping.get(model_type, None)
     available_models = _get_available_models(category)
-    resolved_model_type = model_type
+    resolved_model_type = None
 
-    # An explicit model_type from config should win over path heuristics.
+    # A supported model_type from config should win over path heuristics.
     if model_type_mapped is not None:
         resolved_model_type = model_type_mapped
+    elif model_type in available_models:
+        resolved_model_type = model_type
     elif model_name is not None:
         for part in model_name:
             if part in available_models:
@@ -119,6 +122,9 @@ def get_model_class(
             if part in model_remapping:
                 resolved_model_type = model_remapping[part]
                 break
+
+    if resolved_model_type is None:
+        resolved_model_type = fallback_model_type or model_type
 
     model_type = resolved_model_type
 
