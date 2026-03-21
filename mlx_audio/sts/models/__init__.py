@@ -71,3 +71,7 @@ def __getattr__(name):
         return getattr(module, attr_name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | _SUBMODULES | set(__all__))

@@ -43,24 +43,12 @@ _EXPORTS = {
     "MossFormer2SEModel": ("models.mossformer2_se", "MossFormer2SEModel"),
 }
 
-_OPTIONAL_VOICE_PIPELINE_IMPORTS = (
-    "sounddevice",
-    "webrtcvad",
-    "mlx_lm",
-    "pkg_resources",
-)
-
-
 def _is_missing_voice_pipeline_optional_dep(exc: ImportError) -> bool:
     missing_name = getattr(exc, "name", None)
-    if not missing_name:
-        return False
-
-    normalized_name = missing_name.lstrip("_")
-    return any(
-        normalized_name == dep or normalized_name.startswith(f"{dep}.")
-        for dep in _OPTIONAL_VOICE_PIPELINE_IMPORTS
-    )
+    # Preserve the broad origin/main behavior: any transitive ImportError from
+    # inside voice_pipeline degrades to `None`, but a failure to import the
+    # voice_pipeline module itself should still propagate.
+    return missing_name != f"{__name__}.voice_pipeline"
 
 
 def __getattr__(name):
@@ -80,3 +68,7 @@ def __getattr__(name):
         return getattr(module, attr_name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | {"models"} | set(__all__))

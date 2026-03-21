@@ -15,3 +15,7 @@ def __getattr__(name):
         return {"load": load, "load_model": load_model}[name]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | {"utils"} | set(__all__))

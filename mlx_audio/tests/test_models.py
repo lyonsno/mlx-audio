@@ -178,6 +178,76 @@ class TestPackageCompatibility(SmokeSubprocessTestCase):
             """
         )
 
+    def test_lazy_category_package_exports_remain_visible_to_dir(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            import mlx_audio.lid as lid
+            import mlx_audio.stt as stt
+            import mlx_audio.tts as tts
+            import mlx_audio.vad as vad
+
+            modules = {
+                "mlx_audio.stt": (stt, ("load", "load_model", "utils")),
+                "mlx_audio.tts": (tts, ("load", "load_model", "utils")),
+                "mlx_audio.lid": (lid, ("load", "load_model", "utils")),
+                "mlx_audio.vad": (vad, ("load", "load_model", "utils")),
+            }
+
+            for module_name, (module, expected_names) in modules.items():
+                visible_names = set(dir(module))
+                for name in expected_names:
+                    assert name in visible_names, (
+                        f"{name} missing from dir({module_name})"
+                    )
+
+            print("OK")
+            """
+        )
+
+    def test_lazy_sts_package_exports_remain_visible_to_dir(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            import mlx_audio.sts as sts
+
+            visible_names = set(dir(sts))
+
+            assert "models" in visible_names, "models missing from dir(mlx_audio.sts)"
+            assert "SAMAudio" in visible_names, "SAMAudio missing from dir(mlx_audio.sts)"
+            assert "VoicePipeline" in visible_names, (
+                "VoicePipeline missing from dir(mlx_audio.sts)"
+            )
+
+            print("OK")
+            """
+        )
+
+    def test_lazy_sts_models_exports_remain_visible_to_dir(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            import mlx_audio.sts.models as sts_models
+
+            visible_names = set(dir(sts_models))
+
+            assert "deepfilternet" in visible_names, (
+                "deepfilternet missing from dir(mlx_audio.sts.models)"
+            )
+            assert "sam_audio" in visible_names, (
+                "sam_audio missing from dir(mlx_audio.sts.models)"
+            )
+            assert "lfm_audio" in visible_names, (
+                "lfm_audio missing from dir(mlx_audio.sts.models)"
+            )
+            assert "mossformer2_se" in visible_names, (
+                "mossformer2_se missing from dir(mlx_audio.sts.models)"
+            )
+            assert "DeepFilterNetModel" in visible_names, (
+                "DeepFilterNetModel missing from dir(mlx_audio.sts.models)"
+            )
+
+            print("OK")
+            """
+        )
+
 
 class TestModelClassRouting(SmokeSubprocessTestCase):
     def test_get_model_class_resolves_representative_tts_family(self):
@@ -1397,6 +1467,29 @@ class TestPublicStsStructuralSmoke(SmokeSubprocessTestCase):
             def guarded_import(name, *args, **kwargs):
                 if name == "mlx_audio.sts.voice_pipeline":
                     raise ImportError("blocked compiled extension", name="_webrtcvad")
+                return real_import_module(name, *args, **kwargs)
+
+            with patch("mlx_audio.sts.importlib.import_module", side_effect=guarded_import):
+                assert sts.VoicePipeline is None
+
+            print("OK")
+            """
+        )
+
+    def test_public_sts_voice_pipeline_stays_optional_for_transitive_optional_dep_failures(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from unittest.mock import patch
+
+            import mlx_audio.sts as sts
+
+            real_import_module = sts.importlib.import_module
+
+            def guarded_import(name, *args, **kwargs):
+                if name == "mlx_audio.sts.voice_pipeline":
+                    raise ImportError("blocked transitive optional dep", name="_cffi_backend")
                 return real_import_module(name, *args, **kwargs)
 
             with patch("mlx_audio.sts.importlib.import_module", side_effect=guarded_import):
