@@ -44,11 +44,9 @@ _EXPORTS = {
 }
 
 def _is_missing_voice_pipeline_optional_dep(exc: ImportError) -> bool:
-    missing_name = getattr(exc, "name", None)
-    # Preserve the broad origin/main behavior: any transitive ImportError from
-    # inside voice_pipeline degrades to `None`, but a failure to import the
-    # voice_pipeline module itself should still propagate.
-    return missing_name != f"{__name__}.voice_pipeline"
+    # Preserve origin/main behavior: any ImportError raised while importing
+    # voice_pipeline degrades to `None` rather than bubbling out of the package.
+    return True
 
 
 def __getattr__(name):
@@ -61,8 +59,9 @@ def __getattr__(name):
             module = importlib.import_module(f"{__name__}.{module_name}")
         except ImportError as exc:
             if name == "VoicePipeline" and _is_missing_voice_pipeline_optional_dep(exc):
-                # Preserve the historical contract: optional realtime deps map
-                # to a sentinel None instead of raising on import.
+                # Preserve the historical origin/main contract: VoicePipeline is
+                # optional at package import time, so ImportError degrades to a
+                # sentinel None instead of raising.
                 return None
             raise
         return getattr(module, attr_name)

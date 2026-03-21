@@ -1520,8 +1520,10 @@ class TestPublicStsStructuralSmoke(SmokeSubprocessTestCase):
             """
         )
 
-    def test_public_sts_voice_pipeline_propagates_non_optional_import_errors(self):
-        self.run_in_subprocess(
+    def test_public_sts_voice_pipeline_stays_optional_for_voice_pipeline_import_errors(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
             """
             from unittest.mock import patch
 
@@ -1535,12 +1537,7 @@ class TestPublicStsStructuralSmoke(SmokeSubprocessTestCase):
                 return real_import_module(name, *args, **kwargs)
 
             with patch("mlx_audio.sts.importlib.import_module", side_effect=guarded_import):
-                try:
-                    _ = sts.VoicePipeline
-                except ImportError as exc:
-                    assert exc.name == "mlx_audio.sts.voice_pipeline"
-                else:
-                    raise AssertionError("VoicePipeline should propagate non-optional ImportError")
+                assert sts.VoicePipeline is None
 
             print("OK")
             """
