@@ -205,14 +205,39 @@ def _get_declared_architectures(config: dict) -> set[str]:
     declared_architectures = config.get("architectures")
     if isinstance(declared_architectures, str):
         architectures.add(declared_architectures)
-    elif declared_architectures is not None:
-        architectures.update(declared_architectures)
+    elif isinstance(declared_architectures, (list, tuple, set)):
+        for candidate in declared_architectures:
+            if isinstance(candidate, str):
+                architectures.add(candidate)
 
     architecture = config.get("architecture")
-    if architecture is not None:
+    if isinstance(architecture, str):
         architectures.add(architecture)
 
     return architectures
+
+
+def _get_primary_declared_architecture(config: dict) -> Optional[str]:
+    """Return a preferred declared architecture from singular or plural fields."""
+    architecture = config.get("architecture")
+    if isinstance(architecture, str):
+        return architecture
+
+    declared_architectures = config.get("architectures")
+    if isinstance(declared_architectures, str):
+        return declared_architectures
+    if isinstance(declared_architectures, (list, tuple)):
+        candidates = [candidate for candidate in declared_architectures if isinstance(candidate, str)]
+        if not candidates:
+            return None
+
+        for candidate in candidates:
+            if get_model_category(candidate, []) is not None:
+                return candidate
+
+        return candidates[0]
+
+    return None
 
 
 def _get_config_model_type(config: dict) -> Optional[str]:
@@ -228,7 +253,7 @@ def _get_config_model_type(config: dict) -> Optional[str]:
     ):
         return "wav2vec2"
 
-    return config.get("architecture")
+    return _get_primary_declared_architecture(config)
 
 
 def apply_quantization(

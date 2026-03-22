@@ -557,6 +557,88 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             """
         )
 
+    def test_public_top_level_loader_tolerates_malformed_architectures_sequence_entries(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "architectures": [{"unexpected": "value"}],
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                try:
+                    utils.load_model("/tmp/generic-model")
+                except ValueError as exc:
+                    assert str(exc) == "Could not determine model type for /tmp/generic-model"
+                else:
+                    raise AssertionError(
+                        "malformed architectures entries should fail cleanly"
+                    )
+
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_uses_supported_later_plural_architecture_candidate(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: {
+                    "architectures": ["PreTrainedModel", "ECAPA_TDNN"],
+                },
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            with patch("mlx_audio.utils._get_tts_utils", return_value=tts_utils), patch(
+                "mlx_audio.utils._get_stt_utils", return_value=stt_utils
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ):
+                loaded = utils.load_model("/tmp/generic-model")
+
+            assert loaded == ("lid", "/tmp/generic-model"), loaded
+            print("OK")
+            """
+        )
+
     def test_public_top_level_loader_loads_architecture_only_granite_speech_config_via_stt_runtime_routing(
         self,
     ):
@@ -649,6 +731,110 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             assert isinstance(model, DummyModel)
             assert model.config["config_model_type"] is None
             assert model.config["config_architecture"] == "GraniteSpeechForConditionalGeneration"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.granite_speech")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_loads_plural_architectures_only_granite_speech_config_via_stt_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["GraniteSpeechForConditionalGeneration"],
+                "encoder_config": {},
+                "projector_config": {},
+                "audio_token_index": 42,
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.granite_speech":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch("mlx_audio.utils._get_lid_utils", return_value=lid_utils), patch(
+                "mlx_audio.utils._get_vad_utils", return_value=vad_utils
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == [
+                "GraniteSpeechForConditionalGeneration"
+            ]
             assert model.config["model_path"] == "/tmp/generic-model"
             assert model.strict is False
             assert len(model.loaded_weights) == 1
@@ -764,6 +950,111 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             """
         )
 
+    def test_public_top_level_loader_loads_plural_architectures_only_ecapa_tdnn_config_via_lid_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.lid.utils as lid_utils
+            import mlx_audio.utils as utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["ECAPA_TDNN"],
+                "n_mels": 80,
+                "embedding_dim": 192,
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            vad_utils = SimpleNamespace(
+                load_model=lambda model_name: ("vad", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.lid.models.ecapa_tdnn":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch(
+                "mlx_audio.utils._get_lid_utils",
+                return_value=lid_utils,
+            ), patch(
+                "mlx_audio.utils._get_vad_utils",
+                return_value=vad_utils,
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == ["ECAPA_TDNN"]
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.lid.models.ecapa_tdnn")
+            print("OK")
+            """
+        )
+
     def test_public_top_level_loader_loads_architecture_only_sortformer_config_via_vad_runtime_routing(
         self,
     ):
@@ -860,6 +1151,112 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             assert isinstance(model, DummyModel)
             assert model.config["config_model_type"] is None
             assert model.config["config_architecture"] == "SortformerOffline"
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.vad.models.sortformer")
+            print("OK")
+            """
+        )
+
+    def test_public_top_level_loader_loads_plural_architectures_only_sortformer_config_via_vad_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.utils as utils
+            import mlx_audio.vad.utils as vad_utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["SortformerOffline"],
+                "fc_encoder_config": {},
+                "tf_encoder_config": {},
+                "sortformer_modules": {},
+            }
+            tts_utils = SimpleNamespace(
+                load_config=lambda _model_name: dict(config),
+                load_model=lambda model_name: ("tts", model_name),
+            )
+            stt_utils = SimpleNamespace(
+                load_model=lambda model_name: ("stt", model_name),
+            )
+            lid_utils = SimpleNamespace(
+                load_model=lambda model_name: ("lid", model_name),
+            )
+
+            def import_side_effect(name):
+                if name == "mlx_audio.vad.models.sortformer":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.utils._get_tts_utils",
+                return_value=tts_utils,
+            ), patch(
+                "mlx_audio.utils._get_stt_utils",
+                return_value=stt_utils,
+            ), patch(
+                "mlx_audio.utils._get_lid_utils",
+                return_value=lid_utils,
+            ), patch(
+                "mlx_audio.utils._get_vad_utils",
+                return_value=vad_utils,
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == ["SortformerOffline"]
             assert model.config["model_path"] == "/tmp/generic-model"
             assert model.strict is False
             assert len(model.loaded_weights) == 1
@@ -1349,6 +1746,256 @@ class TestModelClassRouting(SmokeSubprocessTestCase):
             assert model.loaded_weights[0][0] == "weight"
             assert model.eval_called is True
             import_module.assert_called_once_with("mlx_audio.stt.models.mms")
+            print("OK")
+            """
+        )
+
+    def test_public_stt_loader_loads_plural_architectures_only_granite_speech_config_via_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.stt.utils as stt_utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["GraniteSpeechForConditionalGeneration"],
+                "encoder_config": {},
+                "projector_config": {},
+                "audio_token_index": 42,
+            }
+
+            def import_side_effect(name):
+                if name == "mlx_audio.stt.models.granite_speech":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = stt_utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == [
+                "GraniteSpeechForConditionalGeneration"
+            ]
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.stt.models.granite_speech")
+            print("OK")
+            """
+        )
+
+    def test_public_lid_loader_loads_plural_architectures_only_ecapa_tdnn_config_via_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.lid.utils as lid_utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["ECAPA_TDNN"],
+                "n_mels": 80,
+                "embedding_dim": 192,
+            }
+
+            def import_side_effect(name):
+                if name == "mlx_audio.lid.models.ecapa_tdnn":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = lid_utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == ["ECAPA_TDNN"]
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.lid.models.ecapa_tdnn")
+            print("OK")
+            """
+        )
+
+    def test_public_vad_loader_loads_plural_architectures_only_sortformer_config_via_runtime_routing(
+        self,
+    ):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.vad.utils as vad_utils
+
+            class DummyModelConfig:
+                @classmethod
+                def from_dict(cls, config):
+                    return {
+                        "config_model_type": config.get("model_type"),
+                        "config_architectures": config.get("architectures"),
+                        "model_path": config["model_path"],
+                    }
+
+            class DummyModel:
+                def __init__(self, config):
+                    self.config = config
+                    self.loaded_weights = None
+                    self.strict = None
+                    self.eval_called = False
+
+                def load_weights(self, items, strict=False):
+                    self.loaded_weights = list(items)
+                    self.strict = strict
+
+                def parameters(self):
+                    return ()
+
+                def eval(self):
+                    self.eval_called = True
+
+            dummy_module = SimpleNamespace(
+                ModelConfig=DummyModelConfig,
+                Model=DummyModel,
+            )
+            config = {
+                "architectures": ["SortformerOffline"],
+                "fc_encoder_config": {},
+                "tf_encoder_config": {},
+                "sortformer_modules": {},
+            }
+
+            def import_side_effect(name):
+                if name == "mlx_audio.vad.models.sortformer":
+                    return dummy_module
+                raise ImportError(f"missing {name}", name=name)
+
+            with patch(
+                "mlx_audio.utils.get_model_path",
+                return_value=Path("/tmp/generic-model"),
+            ), patch(
+                "mlx_audio.utils.load_config",
+                side_effect=lambda _model_path: dict(config),
+            ), patch(
+                "mlx_audio.utils.load_weights",
+                return_value={"weight": object()},
+            ), patch(
+                "mlx_audio.utils.mx.eval",
+            ), patch(
+                "mlx_audio.model_routing.importlib.import_module",
+                side_effect=import_side_effect,
+            ) as import_module:
+                model = vad_utils.load_model("/tmp/generic-model")
+
+            assert isinstance(model, DummyModel)
+            assert model.config["config_model_type"] is None
+            assert model.config["config_architectures"] == ["SortformerOffline"]
+            assert model.config["model_path"] == "/tmp/generic-model"
+            assert model.strict is False
+            assert len(model.loaded_weights) == 1
+            assert model.loaded_weights[0][0] == "weight"
+            assert model.eval_called is True
+            import_module.assert_called_once_with("mlx_audio.vad.models.sortformer")
             print("OK")
             """
         )
