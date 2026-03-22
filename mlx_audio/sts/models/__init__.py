@@ -27,6 +27,9 @@ __all__ = [
     "LFMModality",
     "ChatState",
     "GenerationConfig",
+    # Moshi
+    "MoshiConfig",
+    "MoshiSTSModel",
 ]
 
 _EXPORTS = {
@@ -51,6 +54,8 @@ _EXPORTS = {
     "LFMModality": ("lfm_audio", "LFMModality"),
     "ChatState": ("lfm_audio", "ChatState"),
     "GenerationConfig": ("lfm_audio", "GenerationConfig"),
+    "MoshiConfig": ("moshi", "MoshiConfig"),
+    "MoshiSTSModel": ("moshi", "MoshiSTSModel"),
 }
 
 _SUBMODULES = {
@@ -58,6 +63,7 @@ _SUBMODULES = {
     "sam_audio",
     "lfm_audio",
     "mossformer2_se",
+    "moshi",
 }
 
 

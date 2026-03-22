@@ -178,6 +178,29 @@ class TestPackageCompatibility(SmokeSubprocessTestCase):
             """
         )
 
+    def test_sts_models_moshi_subpackage_remains_available_as_attribute(self):
+        self.run_in_subprocess_with_fake_mlx(
+            """
+            from types import SimpleNamespace
+            from unittest.mock import patch
+
+            import mlx_audio.sts as sts
+
+            models = sts.models
+            sentinel_module = SimpleNamespace()
+
+            def import_side_effect(name, *args, **kwargs):
+                if name == "mlx_audio.sts.models.moshi":
+                    return sentinel_module
+                raise AssertionError(f"unexpected module import: {name}")
+
+            with patch("mlx_audio.sts.models.importlib.import_module", side_effect=import_side_effect):
+                assert models.moshi is sentinel_module
+
+            print("OK")
+            """
+        )
+
     def test_lazy_category_package_exports_remain_visible_to_dir(self):
         self.run_in_subprocess_with_fake_mlx(
             """
