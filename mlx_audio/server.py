@@ -11,6 +11,7 @@ import base64
 import inspect
 import io
 import json
+import logging
 import os
 import subprocess
 import time
@@ -258,6 +259,102 @@ async def remove_model(model_name: str):
         return Response(status_code=204)  # 204 No Content - successful deletion
     else:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+
+
+def _discover_voices(model, model_name: str = "") -> List[str]:
+    """Discover available voices for a loaded TTS model.
+
+    Supports multiple voice storage patterns across backends:
+    - voxtral_tts: voice_embedding/*.safetensors (populated in post_load_hook)
+    - kokoro: voices/*.safetensors in HF snapshot cache
+    - vibevoice: voices/*.safetensors under config.model_path
+    - qwen3_tts: config-based speaker list via get_supported_speakers()
+
+    Args:
+        model: The loaded model instance.
+        model_name: The model's HF repo ID or name, used as a fallback
+            to locate voices in the HF snapshot cache.
+
+    Returns a sorted list of voice names (without file extensions).
+    """
+    voices = []
+
+    # Method 1: get_supported_speakers() — qwen3_tts
+    if hasattr(model, "get_supported_speakers"):
+        try:
+            voices = list(model.get_supported_speakers())
+        except Exception as e:
+            logging.warning(f"get_supported_speakers() failed: {e}")
+
+    # Method 2: _voice_embedding_files dict — voxtral_tts
+    elif hasattr(model, "_voice_embedding_files") and model._voice_embedding_files:
+        voices = list(model._voice_embedding_files.keys())
+
+    # Method 3: voices/ dir under config.model_path — vibevoice, etc.
+    elif hasattr(model, "config") and hasattr(model.config, "model_path"):
+        model_path = getattr(model.config, "model_path", None)
+        if model_path:
+            voices_dir = Path(model_path) / "voices"
+            if voices_dir.exists():
+                voices = [
+                    f.stem for f in voices_dir.glob("*.safetensors")
+                ]
+
+    # Method 4: HF snapshot cache — kokoro and any model loaded from HF.
+    # Uses model.repo_id if available, otherwise falls back to model_name.
+    if not voices:
+        repo_id = getattr(model, "repo_id", None) or model_name
+        if repo_id:
+            try:
+                from huggingface_hub import snapshot_download
+
+                local_dir = Path(
+                    snapshot_download(
+                        repo_id=repo_id,
+                        local_files_only=True,
+                    )
+                )
+                voices_dir = local_dir / "voices"
+                if voices_dir.exists():
+                    voices = [
+                        f.stem
+                        for f in voices_dir.glob("*.safetensors")
+                    ]
+            except Exception as e:
+                logging.debug(f"HF cache voice scan for '{repo_id}': {e}")
+
+    return sorted(set(voices))
+
+
+@app.get("/v1/voices")
+async def list_voices(model_name: Optional[str] = None):
+    """List available voices for loaded TTS models.
+
+    Args:
+        model_name: Optional model filter. When provided, returns voices
+            for only that model. When omitted, returns voices for all
+            loaded models.
+
+    Returns:
+        A dict mapping model IDs to their available voice names.
+    """
+    if model_name:
+        model_name = unquote(model_name).strip('"')
+        if model_name not in model_provider.models:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_name}' not found"
+            )
+        voices = _discover_voices(model_provider.models[model_name], model_name)
+        return {
+            "object": "list",
+            "data": [{"model": model_name, "voices": voices}],
+        }
+
+    data = []
+    for name, model in model_provider.models.items():
+        voices = _discover_voices(model, name)
+        data.append({"model": name, "voices": voices})
+    return {"object": "list", "data": data}
 
 
 async def generate_audio(model, payload: SpeechRequest):
