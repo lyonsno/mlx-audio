@@ -1,5 +1,6 @@
 """Voxtral-4B-TTS for MLX."""
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from mlx_audio.tts.models.base import BaseModelArgs, GenerationResult
 from .acoustic_head import AcousticTransformerArgs, FlowMatchingAudioTransformer
 from .audio_tokenizer import AudioTokenizerArgs, VoxtralTTSAudioTokenizer
 from .common import pad_to_multiple
+from .tekken import TekkenTokenizer, is_tekken
+from .text_preprocess import sanitize_tts_input_text_for_demo
 
 # Voice name -> index mapping
 VOICE_MAP = {
@@ -286,9 +289,13 @@ class Model(nn.Module):
         # Audio tokenizer (decoder only - we only need decode, not encode)
         self.audio_tokenizer = VoxtralTTSAudioTokenizer(config.get_tokenizer_args())
 
-        # Tokenizer and voice embeddings (loaded in post_load_hook)
+        # Tokenizer and voice embeddings
         self.tokenizer = None
         self._voice_embeddings = {}
+        self._voice_embedding_files = {}
+        self._voice_num_audio_tokens = {}
+        self._text_to_audio_token_id = None
+        self._audio_to_text_token_id = None
 
     @property
     def sample_rate(self):
@@ -308,7 +315,13 @@ class Model(nn.Module):
         """Load tokenizer and voice embeddings after weights are loaded."""
         # Load tekken tokenizer
         tekken_path = model_path / "tekken.json"
-        if tekken_path.exists():
+        if is_tekken(tekken_path):
+            try:
+                tekken_data = json.loads(tekken_path.read_text())
+                model._load_tekken_metadata(tekken_data)
+            except Exception as e:
+                print(f"Warning: Could not parse tekken metadata: {e}")
+
             try:
                 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
@@ -316,12 +329,12 @@ class Model(nn.Module):
                 print(f"Loaded Mistral tokenizer from {tekken_path}")
             except ImportError:
                 try:
-                    from transformers import AutoTokenizer
-
-                    model.tokenizer = AutoTokenizer.from_pretrained(str(model_path))
-                    print(f"Loaded HF tokenizer from {model_path}")
+                    model.tokenizer = TekkenTokenizer.from_file(tekken_path)
+                    print(f"Loaded local Tekken tokenizer from {tekken_path}")
                 except Exception as e:
-                    print(f"Warning: Could not load tokenizer: {e}")
+                    print(
+                        f"Warning: Could not load local Tekken tokenizer or Mistral tokenizer: {e}"
+                    )
         else:
             try:
                 from transformers import AutoTokenizer
@@ -331,22 +344,111 @@ class Model(nn.Module):
             except Exception as e:
                 print(f"Warning: Could not load tokenizer: {e}")
 
-        # Load voice embeddings (.safetensors)
+        model._sync_prompt_token_ids_from_tokenizer()
+
+        # Register voice embeddings for lazy loading.
         voice_dir = model_path / "voice_embedding"
         if voice_dir.exists():
             for voice_file in voice_dir.glob("*.safetensors"):
-                voice_name = voice_file.stem
-                try:
-                    data = mx.load(str(voice_file))
-                    emb = data.get("embedding", next(iter(data.values())))
-                    model._voice_embeddings[voice_name] = emb
-                    print(f"  Loaded voice embedding: {voice_name}")
-                except Exception as e:
-                    print(f"  Warning: Could not load voice {voice_name}: {e}")
-
-            print(f"Loaded {len(model._voice_embeddings)} voice embeddings")
+                model._voice_embedding_files[voice_file.stem] = voice_file
 
         return model
+
+    def _get_voice_embedding(self, voice: str) -> mx.array | None:
+        """Load and cache a single voice embedding on first use."""
+        voice_emb = self._voice_embeddings.get(voice)
+        if voice_emb is not None:
+            return voice_emb
+
+        voice_file = self._voice_embedding_files.get(voice)
+        if voice_file is None:
+            return None
+
+        try:
+            data = mx.load(str(voice_file))
+            voice_emb = data.get("embedding", next(iter(data.values())))
+            self._voice_embeddings[voice] = voice_emb
+            return voice_emb
+        except Exception as e:
+            print(f"  Warning: Could not load voice {voice}: {e}")
+            return None
+
+    def _load_tekken_metadata(self, tekken_data: dict) -> None:
+        """Load prompt-related metadata from tekken.json when mistral_common is absent."""
+        special_tokens = tekken_data.get("special_tokens", [])
+        special_token_ids = {
+            item["token_str"]: item["rank"]
+            for item in special_tokens
+            if "token_str" in item and "rank" in item
+        }
+        self._text_to_audio_token_id = special_token_ids.get("[NEXT_AUDIO_TEXT]")
+        self._audio_to_text_token_id = special_token_ids.get("[REPEAT_AUDIO_TEXT]")
+
+        audio_cfg = tekken_data.get("audio", {})
+        voice_num_audio_tokens = audio_cfg.get("voice_num_audio_tokens", {})
+        if isinstance(voice_num_audio_tokens, dict):
+            self._voice_num_audio_tokens = {
+                str(voice): int(num_tokens)
+                for voice, num_tokens in voice_num_audio_tokens.items()
+            }
+
+    def _sync_prompt_token_ids_from_tokenizer(self) -> None:
+        """Prefer token IDs exposed by the loaded tokenizer when available."""
+        if self.tokenizer is None:
+            return
+
+        try:
+            instruct_tokenizer = getattr(self.tokenizer, "instruct_tokenizer", None)
+            if instruct_tokenizer is not None:
+                audio_encoder = getattr(instruct_tokenizer, "audio_encoder", None)
+                if audio_encoder is not None:
+                    self._text_to_audio_token_id = audio_encoder.text_to_audio_token
+                    self._audio_to_text_token_id = audio_encoder.audio_to_text_token
+                    voice_cfg = getattr(
+                        audio_encoder.audio_config, "voice_num_audio_tokens", None
+                    )
+                    if voice_cfg:
+                        self._voice_num_audio_tokens = {
+                            str(voice): int(num_tokens)
+                            for voice, num_tokens in voice_cfg.items()
+                        }
+                    return
+        except Exception:
+            pass
+
+        audio_cfg = getattr(self.tokenizer, "audio", None)
+        if isinstance(audio_cfg, dict):
+            voice_cfg = audio_cfg.get("voice_num_audio_tokens")
+            if isinstance(voice_cfg, dict) and voice_cfg:
+                self._voice_num_audio_tokens = {
+                    str(voice): int(num_tokens)
+                    for voice, num_tokens in voice_cfg.items()
+                }
+
+        direct_token_lookup = getattr(self.tokenizer, "token_to_id", None)
+        if callable(direct_token_lookup):
+            text_to_audio = direct_token_lookup("[NEXT_AUDIO_TEXT]")
+            audio_to_text = direct_token_lookup("[REPEAT_AUDIO_TEXT]")
+            if text_to_audio is not None:
+                self._text_to_audio_token_id = int(text_to_audio)
+            if audio_to_text is not None:
+                self._audio_to_text_token_id = int(audio_to_text)
+            if (
+                self._text_to_audio_token_id is not None
+                and self._audio_to_text_token_id is not None
+            ):
+                return
+
+        backend = getattr(self.tokenizer, "_tokenizer", None)
+        if backend is None:
+            return
+
+        text_to_audio = backend.token_to_id("[NEXT_AUDIO_TEXT]")
+        audio_to_text = backend.token_to_id("[REPEAT_AUDIO_TEXT]")
+        if text_to_audio is not None:
+            self._text_to_audio_token_id = text_to_audio
+        if audio_to_text is not None:
+            self._audio_to_text_token_id = audio_to_text
 
     def sanitize(self, weights: dict) -> dict:
         """Remap weight names from consolidated.safetensors to our model structure."""
@@ -443,6 +545,14 @@ class Model(nn.Module):
         else:
             return f"{prefix}.{suffix}"
 
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Format a duration in seconds as 00:MM:SS.mmm."""
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"00:{mins:02d}:{secs:02d}.{ms:03d}"
+
     def generate(
         self,
         text: str,
@@ -452,6 +562,8 @@ class Model(nn.Module):
         top_p: float = 0.95,
         max_tokens: int = 4096,
         verbose: bool = False,
+        stream: bool = False,
+        streaming_interval: float = 2.0,
         **kwargs,
     ) -> GenerationResult:
         """Generate speech from text.
@@ -464,9 +576,16 @@ class Model(nn.Module):
             top_p: Nucleus sampling threshold.
             max_tokens: Maximum number of audio tokens to generate.
             verbose: Show progress bar.
+            stream: Enable streaming output. When True, intermediate audio
+                chunks are yielded during generation for lower latency.
+            streaming_interval: Approximate seconds of audio per streaming
+                chunk. Each frame is 80 ms, so the interval is converted to
+                a frame count (``max(1, int(streaming_interval / 0.08))``).
 
         Yields:
-            GenerationResult with audio waveform.
+            GenerationResult with audio waveform. When *stream* is True,
+            intermediate results have ``is_streaming_chunk=True`` and the
+            last result additionally has ``is_final_chunk=True``.
         """
         from mlx_lm.models.cache import make_prompt_cache
 
@@ -479,9 +598,7 @@ class Model(nn.Module):
 
         input_ids = self._encode_text(text, voice)
         input_ids_mx = mx.array(input_ids)[None, :]  # (1, seq_len)
-        input_embeddings = self._build_input_embeddings(
-            input_ids_mx, voice
-        )  # (1, T, dim)
+        input_embeddings = self._build_input_embeddings(input_ids_mx, voice)
 
         # LM backbone returns hidden states; full model returns logits
         lm_backbone = self.language_model.model.model
@@ -505,6 +622,17 @@ class Model(nn.Module):
         )
 
         all_codes = []
+        yielded_frames = 0
+        chunk_idx = 0
+        # Convert streaming_interval (seconds) to frames (1 frame = 80 ms)
+        frames_per_chunk = max(1, int(streaming_interval / 0.08))
+        # Context frames for overlap-add decoding.  The codec decoder uses
+        # sliding-window attention with windows up to 16 (at the final stage).
+        # Including context frames from the previous chunk ensures smooth
+        # transitions without boundary artifacts.
+        context_frames = 16
+        # Each codec frame produces 1920 samples (8x upsample × 240 patch)
+        samples_per_frame = 1920
 
         for i in tqdm(range(max_tokens), disable=not verbose):
             h = hidden[:, -1, :]  # (1, dim)
@@ -535,26 +663,83 @@ class Model(nn.Module):
             if i % 50 == 0:
                 mx.clear_cache()
 
+            # Streaming: yield chunk when buffer is full
+            if stream and len(all_codes) - yielded_frames >= frames_per_chunk:
+                # Include context frames from earlier in the sequence so the
+                # codec decoder's sliding-window attention has proper context,
+                # avoiding boundary artifacts between chunks.
+                ctx_start = max(0, yielded_frames - context_frames)
+                chunk_codes = mx.concatenate(all_codes[ctx_start:], axis=1)
+                full_waveform = self.audio_tokenizer.decode(chunk_codes)
+                full_waveform = full_waveform.squeeze(0)
+
+                # Trim the context portion — keep only new audio
+                ctx_used = yielded_frames - ctx_start
+                trim_samples = ctx_used * samples_per_frame
+                chunk_waveform = full_waveform[trim_samples:]
+
+                chunk_samples = chunk_waveform.shape[0]
+                chunk_duration = chunk_samples / self.config.sample_rate
+                chunk_time = time.time() - time_start
+                chunk_token_count = len(all_codes) - yielded_frames
+
+                yield GenerationResult(
+                    audio=chunk_waveform,
+                    sample_rate=self.config.sample_rate,
+                    samples=chunk_samples,
+                    segment_idx=chunk_idx,
+                    token_count=chunk_token_count,
+                    audio_samples={
+                        "samples": chunk_samples,
+                        "samples-per-sec": self.config.sample_rate,
+                    },
+                    audio_duration=self._format_duration(chunk_duration),
+                    real_time_factor=(
+                        chunk_duration / chunk_time if chunk_time > 0 else 0
+                    ),
+                    prompt={
+                        "tokens": chunk_token_count,
+                        "tokens-per-sec": (
+                            round(chunk_token_count / chunk_time, 2)
+                            if chunk_time > 0
+                            else 0
+                        ),
+                    },
+                    processing_time_seconds=chunk_time,
+                    peak_memory_usage=mx.get_peak_memory() / 1e9,
+                    is_streaming_chunk=True,
+                    is_final_chunk=False,
+                )
+                yielded_frames = len(all_codes)
+                chunk_idx += 1
+                time_start = time.time()
+
         if not all_codes:
             raise RuntimeError("No audio frames generated")
 
-        audio_codes = mx.concatenate(all_codes, axis=1)  # (1, N_frames, 37)
-
-        time_acoustic = time.time()
-
-        # Decode to waveform
-        waveform = self.audio_tokenizer.decode(audio_codes)  # (1, samples)
-        waveform = waveform.squeeze(0)  # (samples,)
+        # Final chunk: decode remaining frames (or all frames if not streaming)
+        remaining = len(all_codes) - yielded_frames
+        if stream and yielded_frames > 0 and remaining > 0:
+            # Decode remainder with context for smooth transition
+            ctx_start = max(0, yielded_frames - context_frames)
+            final_codes = mx.concatenate(all_codes[ctx_start:], axis=1)
+            full_waveform = self.audio_tokenizer.decode(final_codes).squeeze(0)
+            ctx_used = yielded_frames - ctx_start
+            trim_samples = ctx_used * samples_per_frame
+            waveform = full_waveform[trim_samples:]
+        elif stream and yielded_frames > 0 and remaining == 0:
+            # Everything already yielded — emit a zero-length final marker
+            waveform = mx.zeros((0,))
+        else:
+            # Non-streaming (or no intermediate chunks were yielded):
+            # decode everything at once — identical to the original path
+            audio_codes = mx.concatenate(all_codes, axis=1)
+            waveform = self.audio_tokenizer.decode(audio_codes).squeeze(0)
 
         time_end = time.time()
 
         audio_samples = waveform.shape[0]
         audio_duration = audio_samples / self.config.sample_rate
-
-        duration_mins = int(audio_duration // 60)
-        duration_secs = int(audio_duration % 60)
-        duration_ms = int((audio_duration % 1) * 1000)
-        duration_str = f"00:{duration_mins:02d}:{duration_secs:02d}.{duration_ms:03d}"
 
         processing_time = time_end - time_start
 
@@ -562,36 +747,61 @@ class Model(nn.Module):
             audio=waveform,
             sample_rate=self.config.sample_rate,
             samples=audio_samples,
-            segment_idx=0,
-            token_count=audio_codes.shape[1],
+            segment_idx=chunk_idx if stream else 0,
+            token_count=remaining if stream and yielded_frames > 0 else len(all_codes),
             audio_samples={
                 "samples": audio_samples,
                 "samples-per-sec": self.config.sample_rate,
             },
-            audio_duration=duration_str,
+            audio_duration=self._format_duration(audio_duration),
             real_time_factor=(
                 audio_duration / processing_time if processing_time > 0 else 0
             ),
             prompt={
-                "tokens": audio_codes.shape[1],
+                "tokens": (
+                    remaining if stream and yielded_frames > 0 else len(all_codes)
+                ),
                 "tokens-per-sec": (
-                    round(audio_codes.shape[1] / processing_time, 2)
+                    round(
+                        (remaining if stream and yielded_frames > 0 else len(all_codes))
+                        / processing_time,
+                        2,
+                    )
                     if processing_time > 0
                     else 0
                 ),
             },
             processing_time_seconds=processing_time,
             peak_memory_usage=mx.get_peak_memory() / 1e9,
+            is_streaming_chunk=stream,
+            is_final_chunk=stream,
         )
         mx.clear_cache()
 
-    def _encode_text(self, text: str, voice: str) -> list:
-        """Encode text with voice prompt into token IDs.
+    def _encode_text_tokens(self, text: str) -> list[int]:
+        """Tokenize speech text without adding BOS/EOS markers."""
+        encode = getattr(self.tokenizer, "encode", None)
+        if encode is None:
+            raise RuntimeError("Tokenizer does not expose an encode method.")
 
-        Uses mistral_common's SpeechRequest encoding which produces:
-        [BOS, BEGIN_AUDIO, AUDIO*N, text_tokens..., BEGIN_AUDIO]
-        where N = number of voice embedding frames.
-        """
+        try:
+            return list(encode(text, add_special_tokens=False))
+        except TypeError:
+            try:
+                return list(encode(text, bos=False, eos=False))
+            except TypeError:
+                return list(encode(text))
+
+    def _encode_text(self, text: str, voice: str) -> list:
+        """Encode text with voice prompt into token IDs."""
+        text = sanitize_tts_input_text_for_demo(text)
+
+        if self._text_to_audio_token_id is None or self._audio_to_text_token_id is None:
+            raise RuntimeError(
+                "Missing Voxtral speech prompt token IDs. "
+                "Expected [NEXT_AUDIO_TEXT] and [REPEAT_AUDIO_TEXT] from tekken.json."
+            )
+
         try:
             from mistral_common.protocol.speech.request import SpeechRequest
 
@@ -601,20 +811,18 @@ class Model(nn.Module):
         except (ImportError, AttributeError):
             pass
 
-        # Fallback: manual prompt construction matching the expected format
-        voice_emb = self._voice_embeddings.get(voice)
-        n_voice_frames = voice_emb.shape[0] if voice_emb is not None else 0
+        text_tokens = self._encode_text_tokens(text)
+        n_voice_frames = self._voice_num_audio_tokens.get(voice)
+        if n_voice_frames is None:
+            voice_emb = self._get_voice_embedding(voice)
+            n_voice_frames = voice_emb.shape[0] if voice_emb is not None else 0
 
-        if hasattr(self.tokenizer, "encode"):
-            text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
-        else:
-            text_tokens = list(self.tokenizer.encode(text))
-
-        # Format: [BOS, BEGIN_AUDIO, AUDIO*N, text_tokens..., BEGIN_AUDIO]
         return (
             [self.config.bos_token_id, self.config.begin_audio_token_id]
             + [self.config.audio_token_id] * n_voice_frames
+            + [self._text_to_audio_token_id]
             + text_tokens
+            + [self._audio_to_text_token_id]
             + [self.config.begin_audio_token_id]
         )
 
@@ -630,17 +838,13 @@ class Model(nn.Module):
         semantic_size = cfg.semantic_codebook_size + n_special  # 8194
         acoustic_size = cfg.acoustic_codebook_size + n_special  # 23
 
-        # codes: (B, 37) where codes already include per-codebook special token offset
-        # codes[:, 0] is semantic (range [2, 8193])
-        # codes[:, 1:] are acoustic (range [2, 22] each)
-        B, C = codes.shape
-
         # Build offset array: [0, 8194, 8194+23, 8194+46, ...]
         offsets = [0]  # semantic codebook starts at 0
         for i in range(cfg.n_acoustic_codebook):
             offsets.append(semantic_size + i * acoustic_size)
-        offsets = mx.array(offsets)[None, :]  # (1, 37)
-
+        offsets = mx.array(offsets, dtype=codes.dtype).reshape(
+            (1,) * (codes.ndim - 1) + (len(offsets),)
+        )
         return codes + offsets
 
     def _build_input_embeddings(self, input_ids: mx.array, voice: str) -> mx.array:
@@ -650,11 +854,10 @@ class Model(nn.Module):
         """
         embeddings = self.language_model.embed_tokens(input_ids)  # (1, T, dim)
 
-        voice_emb = self._voice_embeddings.get(voice)
+        audio_mask = input_ids[0] == self.config.audio_token_id  # (T,)
+        voice_emb = self._get_voice_embedding(voice)
         if voice_emb is None:
             return embeddings
-
-        audio_mask = input_ids[0] == self.config.audio_token_id  # (T,)
 
         # Map each audio position to a voice embedding index
         indices = mx.cumsum(audio_mask.astype(mx.int32)) - 1

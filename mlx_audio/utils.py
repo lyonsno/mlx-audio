@@ -87,10 +87,8 @@ DEFAULT_ALLOW_PATTERNS = [
     "*.txt",
     "*.jsonl",
     "*.yaml",
-    "*.wav",
-    "*.pth",
-    "*.pt",
     "*.npz",
+    "*.pth",
 ]
 
 
@@ -171,15 +169,6 @@ def load_config(model_path: Union[str, Path], **kwargs) -> dict:
     if config_file.exists():
         with open(config_file, encoding="utf-8") as f:
             return json.load(f)
-
-    # Fallback: some models (e.g. Voxtral TTS) use params.json instead of config.json
-    params_file = model_path / "params.json"
-    if params_file.exists():
-        with open(params_file, encoding="utf-8") as f:
-            params = json.load(f)
-        if "model_type" not in params:
-            params["model_type"] = "unknown"
-        return params
 
     raise FileNotFoundError(f"Config not found at {model_path}")
 
@@ -374,6 +363,10 @@ def base_load_model(
         model_type = config.get("architecture", None)
     if model_type is None:
         model_type = model_name[0].lower() if model_name is not None else None
+
+    # Override model_type for TADA models (config says "llama" but it's TADA)
+    if model_type == "llama" and "acoustic_dim" in config:
+        model_type = "tada"
 
     model_class, model_type = get_model_class(
         model_type=model_type,
