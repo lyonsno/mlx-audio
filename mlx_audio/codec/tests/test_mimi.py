@@ -21,6 +21,29 @@ class TestMimi(unittest.TestCase):
         audio_out = model.decode(codes)
         self.assertEqual(audio_out.shape, (1, 1, 120_960))
 
+    def test_reset_state_clears_every_streaming_component(self):
+        model = Mimi(mimi_202407(2))
+
+        with (
+            patch.object(model.encoder, "reset_state") as reset_encoder,
+            patch.object(model.decoder, "reset_state") as reset_decoder,
+            patch.object(model.downsample, "reset_state") as reset_downsample,
+            patch.object(model.upsample, "reset_state") as reset_upsample,
+            patch(
+                "mlx_audio.codec.models.mimi.mimi._reset_kv_cache"
+            ) as reset_kv_cache,
+        ):
+            model.reset_state()
+
+        reset_encoder.assert_called_once_with()
+        reset_decoder.assert_called_once_with()
+        reset_downsample.assert_called_once_with()
+        reset_upsample.assert_called_once_with()
+        self.assertEqual(
+            reset_kv_cache.call_count,
+            len(model.encoder_cache) + len(model.decoder_cache),
+        )
+
     def test_convtranspose_materializes_expanded_weight(self):
         with patch("mlx_audio.codec.models.mimi.modules.conv.mx.eval") as eval_mock:
             layer = ConvTranspose1d(4, 4, 3, groups=4)
