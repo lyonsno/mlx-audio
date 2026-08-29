@@ -36,6 +36,7 @@ class TransformerConfig:
     dim_feedforward: int
     conv_layout: bool
     rope_traditional: bool = True
+    gelu_approximate: bool = True
 
     @property
     def head_dim(self) -> int:
@@ -136,9 +137,11 @@ class MlpNoGating(nn.Module):
 
         self.linear1 = nn.Linear(cfg.d_model, cfg.dim_feedforward, bias=cfg.bias_ff)
         self.linear2 = nn.Linear(cfg.dim_feedforward, cfg.d_model, bias=cfg.bias_ff)
+        self.gelu_approximate = cfg.gelu_approximate
 
     def __call__(self, xs: mx.array) -> mx.array:
-        return self.linear2(nn.gelu_approx(self.linear1(xs)))
+        activation = nn.gelu_approx if self.gelu_approximate else nn.gelu
+        return self.linear2(activation(self.linear1(xs)))
 
 
 class TransformerLayer(nn.Module):
