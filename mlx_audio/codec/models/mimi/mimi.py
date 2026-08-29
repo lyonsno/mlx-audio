@@ -354,6 +354,12 @@ class Mimi(nn.Module):
         prefix: str = "",
         strict: bool = True,
     ) -> nn.Module:
+        transformer = self.cfg.transformer
+        if transformer.rope_traditional or transformer.gelu_approximate:
+            raise ValueError(
+                "Transformers Mimi weights require split-half RoPE and exact GELU; "
+                "construct the model with mimi_202407(..., transformers_compatible=True)"
+            )
         converted = self.sanitize_transformers_weights(weights, prefix=prefix)
         model = self.load_weights(list(converted.items()), strict=strict)
         return self._finalize_loaded_weights(model)

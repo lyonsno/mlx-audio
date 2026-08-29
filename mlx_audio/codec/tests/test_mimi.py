@@ -177,6 +177,20 @@ class TestMimi(unittest.TestCase):
         finalize.assert_called_once()
         self.assertIs(result, model)
 
+    def test_load_transformers_weights_rejects_legacy_transformer_math(self):
+        model = Mimi(mimi_202407(2))
+
+        with (
+            patch.object(
+                Mimi,
+                "sanitize_transformers_weights",
+                return_value={"converted.weight": mx.ones((2, 2))},
+            ),
+            patch.object(model, "load_weights", return_value=model),
+        ):
+            with self.assertRaisesRegex(ValueError, "transformers_compatible=True"):
+                model.load_transformers_weights({"source.weight": mx.ones((2, 2))})
+
 
 if __name__ == "__main__":
     unittest.main()
