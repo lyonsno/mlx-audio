@@ -44,7 +44,9 @@ class MimiConfig:
     quantizer_dim: int
 
 
-def mimi_202407(num_codebooks: int) -> MimiConfig:
+def mimi_202407(
+    num_codebooks: int, *, transformers_compatible: bool = False
+) -> MimiConfig:
     seanet = SeanetConfig(
         dimension=512,
         channels=1,
@@ -79,6 +81,8 @@ def mimi_202407(num_codebooks: int) -> MimiConfig:
         kv_repeat=1,
         dim_feedforward=2048,
         conv_layout=True,
+        rope_traditional=not transformers_compatible,
+        gelu_approximate=not transformers_compatible,
         use_conv_block=False,
         cross_attention=False,
         conv_kernel_size=3,
@@ -189,6 +193,171 @@ class Mimi(nn.Module):
     def sample_rate(self) -> float:
         return self.cfg.sample_rate
 
+    @staticmethod
+    def sanitize_transformers_weights(
+        weights: dict[str, mx.array], prefix: str = ""
+    ) -> dict[str, mx.array]:
+        """Convert current Transformers Mimi weights to the MLX Mimi layout."""
+
+        converted: dict[str, mx.array] = {}
+        qkv_groups: dict[str, dict[str, mx.array]] = {}
+
+        def map_seanet_key(key: str) -> str | None:
+            branch, separator, rest = key.partition(".layers.")
+            if not separator or branch not in {"encoder", "decoder"}:
+                return None
+
+            layer_text, separator, parameter = rest.partition(".")
+            if not separator:
+                return None
+            layer_index = int(layer_text)
+
+            if layer_index == 0:
+                target = f"{branch}.init_conv1d.{parameter}"
+            elif layer_index == 14:
+                target = f"{branch}.final_conv1d.{parameter}"
+            elif branch == "encoder" and layer_index in (1, 4, 7, 10):
+                target = (
+                    f"encoder.layers.{(layer_index - 1) // 3}.residuals.0."
+                    f"{parameter}"
+                )
+            elif branch == "encoder" and layer_index in (3, 6, 9, 12):
+                target = (
+                    f"encoder.layers.{(layer_index - 3) // 3}.downsample."
+                    f"{parameter}"
+                )
+            elif branch == "decoder" and layer_index in (2, 5, 8, 11):
+                parameter = parameter.removeprefix("conv.")
+                return (
+                    f"decoder.layers.{(layer_index - 2) // 3}.upsample."
+                    f"convtr.convtr.{parameter}"
+                )
+            elif branch == "decoder" and layer_index in (3, 6, 9, 12):
+                target = (
+                    f"decoder.layers.{(layer_index - 3) // 3}.residuals.0."
+                    f"{parameter}"
+                )
+            else:
+                return None
+
+            target = target.replace(".block.1.", ".block.0.")
+            target = target.replace(".block.3.", ".block.1.")
+            target = target.replace(".conv.weight", ".conv.conv.weight")
+            target = target.replace(".conv.bias", ".conv.conv.bias")
+            return target
+
+        def map_transformer_key(key: str) -> tuple[str | None, str | None]:
+            transformer, separator, rest = key.partition("_transformer.layers.")
+            if not separator or transformer not in {"encoder", "decoder"}:
+                return None, None
+
+            layer_index, separator, parameter = rest.partition(".")
+            if not separator:
+                return None, None
+            target_base = f"{transformer}_transformer.transformer.layers.{layer_index}."
+
+            for projection in ("q", "k", "v"):
+                source = f"self_attn.{projection}_proj.weight"
+                if parameter == source:
+                    target = f"{target_base}self_attn.in_proj.weight"
+                    return None, f"{target}:{projection}"
+
+            replacements = {
+                "input_layernorm.": "norm1.",
+                "post_attention_layernorm.": "norm2.",
+                "mlp.fc1.": "gating.linear1.",
+                "mlp.fc2.": "gating.linear2.",
+                "self_attn.o_proj.": "self_attn.out_proj.",
+                "self_attn_layer_scale.": "layer_scale_1.",
+                "mlp_layer_scale.": "layer_scale_2.",
+            }
+            for source, target in replacements.items():
+                if parameter.startswith(source):
+                    return target_base + parameter.replace(source, target, 1), None
+            return None, None
+
+        for source_key, value in weights.items():
+            if prefix and not source_key.startswith(prefix):
+                continue
+            key = source_key[len(prefix) :] if prefix else source_key
+
+            target, qkv_target = map_transformer_key(key)
+            if qkv_target is not None:
+                group, projection = qkv_target.rsplit(":", 1)
+                qkv_groups.setdefault(group, {})[projection] = value
+                continue
+
+            if target is None:
+                target = map_seanet_key(key)
+
+            if target is None and key.startswith("quantizer."):
+                target = key.replace(
+                    "quantizer.semantic_residual_vector_quantizer",
+                    "quantizer.rvq_first",
+                ).replace(
+                    "quantizer.acoustic_residual_vector_quantizer",
+                    "quantizer.rvq_rest",
+                )
+                target = target.replace(".layers.", ".vq.layers.")
+                target = target.replace(
+                    ".codebook.embed_sum", ".codebook.embedding_sum"
+                )
+
+            if target is None and key == "downsample.conv.weight":
+                target = "downsample.conv.conv.conv.weight"
+            if target is None and key == "upsample.conv.weight":
+                target = "upsample.convtr.convtr.convtr.weight"
+
+            if target is None:
+                raise ValueError(f"unsupported Transformers Mimi weight: {source_key}")
+
+            if value.ndim == 3:
+                if ".convtr." in target:
+                    if value.shape[1] == 1:
+                        value = value.transpose(0, 2, 1)
+                    else:
+                        value = value.transpose(1, 2, 0)
+                else:
+                    value = value.swapaxes(-1, -2)
+            converted[target] = value
+
+        for target, projections in qkv_groups.items():
+            missing = [name for name in ("q", "k", "v") if name not in projections]
+            if missing:
+                raise ValueError(
+                    f"incomplete QKV group for {target}: missing {', '.join(missing)}"
+                )
+            converted[target] = mx.concatenate(
+                [projections[name] for name in ("q", "k", "v")], axis=0
+            )
+
+        if not converted:
+            raise ValueError(
+                "no Transformers Mimi weights matched the requested prefix"
+            )
+        return converted
+
+    def _finalize_loaded_weights(self, model: nn.Module) -> nn.Module:
+        def materialize(module, name, _):
+            if isinstance(module, EuclideanCodebook) and name == "initialized":
+                module.update_in_place()
+            if isinstance(module, ConvTranspose1d) and name == "weight":
+                module.update_in_place()
+            return True
+
+        model.filter_and_map(materialize)
+        return model
+
+    def load_transformers_weights(
+        self,
+        weights: dict[str, mx.array],
+        prefix: str = "",
+        strict: bool = True,
+    ) -> nn.Module:
+        converted = self.sanitize_transformers_weights(weights, prefix=prefix)
+        model = self.load_weights(list(converted.items()), strict=strict)
+        return self._finalize_loaded_weights(model)
+
     def load_pytorch_weights(
         self,
         file: str,
@@ -249,17 +418,8 @@ class Mimi(nn.Module):
                 else:
                     v = v.transpose(1, 2, 0)
             weights.append((k, v))
-        m = self.load_weights(weights, strict=strict)
-
-        def _filter_fn(module, name, _):
-            if isinstance(module, EuclideanCodebook) and name == "initialized":
-                module.update_in_place()
-            if isinstance(module, ConvTranspose1d) and name == "weight":
-                module.update_in_place()
-            return True
-
-        m.filter_and_map(_filter_fn)
-        return m
+        model = self.load_weights(weights, strict=strict)
+        return self._finalize_loaded_weights(model)
 
     @classmethod
     def from_pretrained(
