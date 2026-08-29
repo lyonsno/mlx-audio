@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import mlx.core as mx
 
-from ..models.mimi.mimi import Mimi, mimi_202407
+from ..models.mimi.mimi import Mimi, MimiStreamingDecoder, mimi_202407
 from ..models.mimi.modules.conv import ConvTranspose1d
 from ..models.mimi.modules.quantization import EuclideanCodebook
 from ..models.mimi.modules.transformer import MlpNoGating
@@ -29,9 +29,7 @@ class TestMimi(unittest.TestCase):
             patch.object(model.decoder, "reset_state") as reset_decoder,
             patch.object(model.downsample, "reset_state") as reset_downsample,
             patch.object(model.upsample, "reset_state") as reset_upsample,
-            patch(
-                "mlx_audio.codec.models.mimi.mimi._reset_kv_cache"
-            ) as reset_kv_cache,
+            patch("mlx_audio.codec.models.mimi.mimi._reset_kv_cache") as reset_kv_cache,
         ):
             model.reset_state()
 
@@ -43,6 +41,81 @@ class TestMimi(unittest.TestCase):
             reset_kv_cache.call_count,
             len(model.encoder_cache) + len(model.decoder_cache),
         )
+
+    def test_reset_state_restores_incremental_outputs(self):
+        model = Mimi(mimi_202407(2))
+        mx.eval(model.parameters())
+
+        encoder_state_a = mx.ones((1, model.cfg.seanet.dimension, 2)) * 0.25
+        encoder_state_b = mx.ones((1, model.cfg.seanet.dimension, 2)) * -0.5
+        model.downsample.reset_state()
+        fresh_prequant = model.downsample.step(encoder_state_b)
+        mx.eval(fresh_prequant)
+        model.downsample.reset_state()
+        mx.eval(model.downsample.step(encoder_state_a))
+        model.reset_state()
+        reset_prequant = model.downsample.step(encoder_state_b)
+        mx.eval(reset_prequant)
+
+        self.assertTrue(mx.array_equal(reset_prequant, fresh_prequant))
+
+        decoder_state_a = mx.ones((1, model.cfg.seanet.dimension, 1)) * 0.25
+        decoder_state_b = mx.ones((1, model.cfg.seanet.dimension, 1)) * -0.5
+        model.upsample.reset_state()
+        fresh_upsampled = model.upsample.step(decoder_state_b)
+        mx.eval(fresh_upsampled)
+        model.upsample.reset_state()
+        mx.eval(model.upsample.step(decoder_state_a))
+        model.reset_state()
+        reset_upsampled = model.upsample.step(decoder_state_b)
+        mx.eval(reset_upsampled)
+
+        self.assertTrue(mx.array_equal(reset_upsampled, fresh_upsampled))
+
+        audio_a = mx.linspace(-0.4, 0.4, 1920).reshape(1, 1, -1)
+        audio_b = mx.sin(mx.arange(1920, dtype=mx.float32) * 0.013).reshape(1, 1, -1)
+
+        model.reset_state()
+        fresh_codes = model.encode_step(audio_b)
+        mx.eval(fresh_codes)
+        model.reset_state()
+        mx.eval(model.encode_step(audio_a))
+        model.reset_state()
+        reset_codes = model.encode_step(audio_b)
+        mx.eval(reset_codes)
+
+        self.assertTrue(mx.array_equal(reset_codes, fresh_codes))
+
+        codes_a = mx.array([[[11], [37]]])
+        codes_b = mx.array([[[71], [109]]])
+
+        model.reset_state()
+        fresh_audio = model.decode_step(codes_b)
+        mx.eval(fresh_audio)
+        model.reset_state()
+        mx.eval(model.decode_step(codes_a))
+        model.reset_state()
+        reset_audio = model.decode_step(codes_b)
+        mx.eval(reset_audio)
+
+        self.assertTrue(mx.array_equal(reset_audio, fresh_audio))
+
+    def test_streaming_decoder_reset_restores_incremental_output(self):
+        model = Mimi(mimi_202407(2))
+        mx.eval(model.parameters())
+        decoder = MimiStreamingDecoder(model)
+        codes_a = mx.array([[[11], [37]]])
+        codes_b = mx.array([[[71], [109]]])
+
+        fresh_audio = decoder.decode_frames(codes_b)
+        mx.eval(fresh_audio)
+        decoder.reset()
+        mx.eval(decoder.decode_frames(codes_a))
+        decoder.reset()
+        reset_audio = decoder.decode_frames(codes_b)
+        mx.eval(reset_audio)
+
+        self.assertTrue(mx.array_equal(reset_audio, fresh_audio))
 
     def test_convtranspose_materializes_expanded_weight(self):
         with patch("mlx_audio.codec.models.mimi.modules.conv.mx.eval") as eval_mock:
