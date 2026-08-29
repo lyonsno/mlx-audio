@@ -142,6 +142,8 @@ class Mimi(nn.Module):
     def reset_state(self):
         self.encoder.reset_state()
         self.decoder.reset_state()
+        self.downsample.reset_state()
+        self.upsample.reset_state()
         for c in self.decoder_cache:
             _reset_kv_cache(c)
         for c in self.encoder_cache:
