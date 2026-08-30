@@ -1190,11 +1190,36 @@ class RaonDuplexModel(RaonSpeechModel):
         audio_input_embeds_mask: mx.array,
         previous_audio_codes: Optional[mx.array],
     ) -> mx.array:
-        inputs = self.prepare_speech_embeddings(
-            input_ids,
-            audio_input_embeds,
-            audio_input_embeds_mask,
+        empty_streaming_frame = (
+            audio_input_embeds.ndim == 3
+            and audio_input_embeds.shape[1] == 0
+            and audio_input_embeds_mask.ndim == 2
+            and audio_input_embeds_mask.shape == audio_input_embeds.shape[:2]
         )
+        if empty_streaming_frame:
+            if input_ids.ndim != 2:
+                raise ValueError(
+                    "Raon speech input IDs must have shape (batch, sequence)."
+                )
+            if audio_input_embeds.shape[0] != input_ids.shape[0]:
+                raise ValueError("Raon speech input batch dimensions must match.")
+            if audio_input_embeds.shape[-1] != self.config.thinker.hidden_size:
+                raise ValueError(
+                    "Raon audio input embedding size must match the thinker hidden size."
+                )
+            input_count = int(mx.sum(input_ids == AUDIO_INPUT_PLACEHOLDER_ID).item())
+            if input_count != 1:
+                raise ValueError(
+                    "Raon duplex empty streaming frames require exactly one "
+                    "audio input placeholder."
+                )
+            inputs = self.thinker.embed_tokens(input_ids)
+        else:
+            inputs = self.prepare_speech_embeddings(
+                input_ids,
+                audio_input_embeds,
+                audio_input_embeds_mask,
+            )
         if previous_audio_codes is None:
             return inputs
         output_mask = input_ids == AUDIO_OUTPUT_PLACEHOLDER_ID

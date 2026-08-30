@@ -315,6 +315,61 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 lambda _: raon.AUDIO_OUTPUT_PAD_ID,
             )
 
+    def test_duplex_frame_advances_across_empty_streaming_embedding(self):
+        speech_config = self._config(raon.RaonSpeechConfig)
+        config = raon.RaonDuplexConfig.from_speech_config(
+            speech_config,
+            state=raon.DuplexStateConfig(
+                use_duplex_end_pad=True,
+                use_sil_token=True,
+                sequence_mode="uta",
+            ),
+        )
+        model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+        state = model.init_duplex_state(
+            mx.array([7], dtype=mx.int32),
+            speak_first=True,
+            first_code_sampler=lambda _: mx.array([1], dtype=mx.int32),
+        )
+        frame_ids = mx.array([state.machine_state.last_frame_tokens], dtype=mx.int32)
+        empty_audio = mx.zeros((1, 0, config.thinker.hidden_size))
+        empty_mask = mx.zeros((1, 0), dtype=mx.bool_)
+
+        prepared = model._prepare_duplex_embeddings(
+            frame_ids,
+            empty_audio,
+            empty_mask,
+            state.audio_codes[:, -1:],
+        )
+        base = model.thinker.embed_tokens(frame_ids)
+        feedback = model.feedback_embedding(state.audio_codes[:, -1:])
+        mx.eval(prepared, base, feedback)
+        np.testing.assert_allclose(np.array(prepared[:, :2]), np.array(base[:, :2]))
+        np.testing.assert_allclose(
+            np.array(prepared[:, -1]),
+            np.array(feedback[:, 0]),
+            atol=1e-6,
+        )
+
+        result = model.duplex_frame(
+            state,
+            audio_input_embeds=empty_audio,
+            audio_input_embeds_mask=empty_mask,
+            text_sampler=lambda _: 7,
+            first_code_sampler=lambda _: mx.array([2], dtype=mx.int32),
+        )
+
+        self.assertEqual(
+            result.frame_tokens,
+            [
+                raon.AUDIO_INPUT_PLACEHOLDER_ID,
+                7,
+                raon.AUDIO_OUTPUT_PLACEHOLDER_ID,
+            ],
+        )
+        self.assertEqual(result.state.thinker_cache[0].offset, 6)
+        self.assertEqual(result.state.talker_cache[0].offset, 6)
+
     def test_generated_codes_feed_back_and_both_caches_advance(self):
         _, model_type, _ = self._types()
         mx.random.seed(19)
