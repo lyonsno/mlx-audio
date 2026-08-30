@@ -4,6 +4,8 @@ import mlx.core as mx
 import numpy as np
 
 import mlx_audio.sts.models.raon as raon
+from mlx_audio.sts.voice_pipeline import PocketTTSResponder
+from mlx_audio.tts.models.base import GenerationResult
 
 
 class _FakeQuantizer:
@@ -25,7 +27,7 @@ class _FakeCodec:
 
     def decode(self, codes: mx.array) -> mx.array:
         frame_values = mx.sum(codes.astype(mx.float32), axis=1)
-        return mx.repeat(frame_values[:, None, :], 8, axis=-1)
+        return mx.repeat(frame_values[:, None, :], 1920, axis=-1)
 
 
 class _FakeTokenizer:
@@ -155,7 +157,7 @@ class TestRaonTextToSpeech(unittest.TestCase):
         model = model_type(self._config(), codec=_FakeCodec(8))
         sampled = iter([1, 2, 3])
 
-        result = model.generate(
+        result = model.generate_frames(
             mx.array([7, raon.AUDIO_START_ID]),
             max_frames=3,
             first_code_sampler=lambda _: next(sampled),
@@ -183,7 +185,7 @@ class TestRaonTextToSpeech(unittest.TestCase):
         model = model_type(self._config(), codec=_FakeCodec(8))
         sampled = iter([2, self._config().codebook_size])
 
-        result = model.generate(
+        result = model.generate_frames(
             mx.array([7, raon.AUDIO_START_ID]),
             max_frames=5,
             first_code_sampler=lambda _: next(sampled),
@@ -193,7 +195,29 @@ class TestRaonTextToSpeech(unittest.TestCase):
         self.assertEqual(result.finish_reason, "audio_end")
         self.assertEqual(result.audio_codes.shape[1], 1)
         self.assertEqual(result.steps[-1].first_code, self._config().codebook_size)
-        self.assertEqual(result.audio.shape, (1, 1, 8))
+        self.assertEqual(result.audio.shape, (1, 1, 1920))
+
+    def test_public_generation_composes_through_responder_and_trims_final_frame(self):
+        _, model_type, _ = self._types()
+        model = model_type(self._config(), codec=_FakeCodec(8))
+        model.tokenizer = _FakeTokenizer()
+        model.max_frames = 3
+        model.speech.audio_lm_head.weight = mx.zeros_like(
+            model.speech.audio_lm_head.weight
+        )
+
+        chunks = list(PocketTTSResponder(model).create_generator("hello"))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertIsInstance(chunks[0], GenerationResult)
+        self.assertEqual(chunks[0].audio.shape, (3840,))
+        self.assertEqual(chunks[0].samples, 3840)
+        self.assertEqual(chunks[0].sample_rate, 24_000)
+        self.assertEqual(chunks[0].segment_idx, 0)
+        self.assertEqual(chunks[0].token_count, 3)
+        self.assertTrue(chunks[0].is_final_chunk)
+        self.assertFalse(chunks[0].is_streaming_chunk)
+        self.assertEqual(chunks[0].prompt["text"], "hello")
 
     def test_source_weight_admission_fails_loud_on_missing_family(self):
         _, model_type, _ = self._types()
@@ -201,6 +225,38 @@ class TestRaonTextToSpeech(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing source families"):
             model.validate_source_families({"lm_head.weight": mx.zeros((151680, 8))})
+
+    def test_source_classification_rejects_unknown_root_and_supported_family(self):
+        _, model_type, _ = self._types()
+        model = model_type(self._config(), codec=_FakeCodec(8))
+
+        for name in ("future_module.weight", "lm_head.unrecognized"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "unclassified source tensor"):
+                    model.classify_source_weights({name: mx.zeros((1,))})
+
+    def test_source_classification_records_explicit_tts_exclusions(self):
+        _, model_type, _ = self._types()
+        model = model_type(self._config(), codec=_FakeCodec(8))
+        excluded = {
+            "audio_encoder.layer.weight": mx.zeros((1,)),
+            "input_adaptor.proj.weight": mx.zeros((1,)),
+            "speaker_encoder.layer.weight": mx.zeros((1,)),
+        }
+
+        receipt = model.classify_source_weights(excluded)
+
+        self.assertEqual(receipt["source_tensor_count"], 3)
+        self.assertEqual(receipt["excluded_source_count"], 3)
+        self.assertEqual(
+            receipt["excluded_families"],
+            {
+                "audio_encoder.": 1,
+                "input_adaptor.": 1,
+                "speaker_encoder.": 1,
+            },
+        )
+        self.assertEqual(receipt["unclassified_source_count"], 0)
 
 
 if __name__ == "__main__":
