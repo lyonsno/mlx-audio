@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -251,19 +252,27 @@ class TestRaonSpeechComponents(unittest.TestCase):
         self.assertEqual(first.shape, (1, 3))
         np.testing.assert_array_equal(np.array(first), np.array(second))
 
-    def test_code_predictor_promotes_activations_without_expanding_weights(self):
+    def test_code_predictor_preserves_fp32_hidden_cache_and_logits(self):
         class RecordingCore(nn.Module):
             def __init__(self, inner):
                 super().__init__()
                 self.inner = inner
                 self.input_dtypes = []
+                self.output_dtypes = []
+                self.cache_dtypes = []
 
             def make_cache(self):
                 return self.inner.make_cache()
 
             def __call__(self, inputs_embeds, cache=None):
                 self.input_dtypes.append(inputs_embeds.dtype)
-                return self.inner(inputs_embeds, cache=cache)
+                output = self.inner(inputs_embeds, cache=cache)
+                mx.eval(output)
+                self.output_dtypes.append(output.dtype)
+                self.cache_dtypes.append(
+                    [(layer.keys.dtype, layer.values.dtype) for layer in cache]
+                )
+                return output
 
         _, components_type, _ = self._component_types()
         model = components_type(self._tiny_config())
@@ -271,15 +280,59 @@ class TestRaonSpeechComponents(unittest.TestCase):
         recording = RecordingCore(model.code_predictor.model)
         model.code_predictor.model = recording
         inputs = mx.arange(16, dtype=mx.bfloat16).reshape(1, 2, 8) / 16
+        logits_dtypes = []
+        original_argmax = mx.argmax
 
-        codes = model.code_predictor.predict_codes(inputs)
+        def recording_argmax(logits, *args, **kwargs):
+            logits_dtypes.append(logits.dtype)
+            return original_argmax(logits, *args, **kwargs)
+
+        with mock.patch(
+            "mlx_audio.sts.models.raon.components.mx.argmax",
+            side_effect=recording_argmax,
+        ):
+            codes = model.code_predictor.predict_codes(inputs)
         mx.eval(codes)
 
         self.assertEqual(recording.input_dtypes, [mx.float32, mx.float32])
-        parameter_dtypes = {
-            value.dtype for _, value in tree_flatten(model.code_predictor.parameters())
-        }
-        self.assertEqual(parameter_dtypes, {mx.bfloat16})
+        self.assertEqual(recording.output_dtypes, [mx.float32, mx.float32])
+        self.assertEqual(
+            recording.cache_dtypes,
+            [[(mx.float32, mx.float32)], [(mx.float32, mx.float32)]],
+        )
+        self.assertEqual(logits_dtypes, [mx.float32, mx.float32])
+
+    def test_component_loading_preserves_checkpoint_dtype_through_prediction(self):
+        _, components_type, _ = self._component_types()
+
+        for checkpoint_dtype in (mx.bfloat16, mx.float16):
+            with self.subTest(checkpoint_dtype=checkpoint_dtype):
+                source = components_type(self._tiny_config())
+                checkpoint_weights = {
+                    name: mx.zeros(value.shape, dtype=checkpoint_dtype)
+                    for name, value in tree_flatten(source.parameters())
+                }
+                model = components_type(self._tiny_config())
+                receipt = model.load_component_weights(checkpoint_weights)
+                before = [
+                    (value.dtype, value.nbytes)
+                    for _, value in tree_flatten(model.parameters())
+                ]
+
+                codes = model.generate_audio_codes(
+                    mx.zeros((1, 2, model.config.thinker_hidden_size))
+                )
+                mx.eval(codes)
+                after = [
+                    (value.dtype, value.nbytes)
+                    for _, value in tree_flatten(model.parameters())
+                ]
+
+                self.assertEqual(receipt["expected"], receipt["admitted"])
+                self.assertEqual(codes.shape, (1, 3))
+                self.assertTrue(before)
+                self.assertEqual(before, after)
+                self.assertEqual({dtype for dtype, _ in after}, {checkpoint_dtype})
 
     def test_talker_rejects_explicit_attention_mask_with_nonempty_cache(self):
         _, components_type, _ = self._component_types()
