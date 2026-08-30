@@ -5,6 +5,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from mlx_audio.lm.models.base import create_attention_mask
 from mlx_audio.lm.models.cache import KVCache
 from mlx_audio.stt.models.voxtral_realtime.config import EncoderConfig
 from mlx_audio.stt.models.voxtral_realtime.encoder import AudioEncoder
@@ -237,8 +238,12 @@ class RaonTalker(nn.Module):
                 else:
                     mask = pad_mask
             elif seq_len > 1:
-                mask = nn.MultiHeadAttention.create_additive_causal_mask(seq_len)
-                mask = mask.astype(inputs_embeds.dtype)
+                causal = create_attention_mask(
+                    inputs_embeds,
+                    cache[0] if cache else None,
+                    return_array=True,
+                )
+                mask = mx.where(causal, 0.0, -mx.inf).astype(inputs_embeds.dtype)
 
         hidden_states = inputs_embeds
         for index, layer in enumerate(self.layers):

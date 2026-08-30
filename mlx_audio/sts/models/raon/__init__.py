@@ -18,6 +18,10 @@ from .duplex import (
 )
 from .tts import (
     AUDIO_END_ID,
+    RaonDuplexConfig,
+    RaonDuplexFrameResult,
+    RaonDuplexFrameState,
+    RaonDuplexModel,
     RaonSpeechConfig,
     RaonSpeechModel,
     RaonTTSConfig,
@@ -41,6 +45,10 @@ __all__ = [
     "DuplexStateConfig",
     "DuplexStateManager",
     "RaonComponentConfig",
+    "RaonDuplexConfig",
+    "RaonDuplexFrameResult",
+    "RaonDuplexFrameState",
+    "RaonDuplexModel",
     "RaonSpeechComponents",
     "RaonSpeechConfig",
     "RaonSpeechModel",
