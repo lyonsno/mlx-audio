@@ -14,8 +14,10 @@ import logging
 import re
 from pathlib import Path
 from typing import (
+    BinaryIO,
     List,
     Optional,
+    Sequence,
     Tuple,
     Type,
     TypeVar,
@@ -176,11 +178,17 @@ def load_config(model_path: Union[str, Path], **kwargs) -> dict:
     raise FileNotFoundError(f"Config not found at {model_path}")
 
 
-def load_weights(model_path: Path) -> dict:
+def load_weights(
+    model_path: Path,
+    *,
+    weight_files: Optional[Sequence[Union[str, Path, BinaryIO]]] = None,
+) -> dict:
     """Load model weights from safetensors or npz files.
 
     Args:
         model_path: Path to the model directory
+        weight_files: Optional explicit weight paths or open binary files to load
+            instead of discovering files from ``model_path``.
 
     Returns:
         dict: Dictionary of weight name -> array
@@ -188,19 +196,27 @@ def load_weights(model_path: Path) -> dict:
     Raises:
         FileNotFoundError: If no weight files found
     """
-    # Try safetensors first, then npz
-    weight_files = glob.glob(str(model_path / "*.safetensors"))
+    if weight_files is None:
+        # Try safetensors first, then npz
+        selected_files = glob.glob(str(model_path / "*.safetensors"))
 
-    if not weight_files:
-        weight_files = glob.glob(str(model_path / "*.npz"))
+        if not selected_files:
+            selected_files = glob.glob(str(model_path / "*.npz"))
+    else:
+        selected_files = [
+            weight_file if hasattr(weight_file, "read") else str(Path(weight_file))
+            for weight_file in weight_files
+        ]
 
-    if not weight_files:
+    if not selected_files:
         raise FileNotFoundError(
             f"No weight files (safetensors or npz) found in {model_path}"
         )
 
     weights = {}
-    for wf in weight_files:
+    for wf in selected_files:
+        if hasattr(wf, "seek"):
+            wf.seek(0)
         weights.update(mx.load(wf))
 
     return weights

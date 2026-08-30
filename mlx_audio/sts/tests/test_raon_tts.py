@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import mlx.core as mx
 import numpy as np
@@ -6,6 +9,7 @@ import numpy as np
 import mlx_audio.sts.models.raon as raon
 from mlx_audio.sts.voice_pipeline import PocketTTSResponder
 from mlx_audio.tts.models.base import GenerationResult
+from mlx_audio.utils import load_weights
 
 
 class _FakeQuantizer:
@@ -236,6 +240,60 @@ class TestRaonTextToSpeech(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing source families"):
             model.validate_source_families({"lm_head.weight": mx.zeros((151680, 8))})
+
+    def test_explicit_weight_files_exclude_unadmitted_directory_members(self):
+        with TemporaryDirectory() as directory:
+            model_path = Path(directory)
+            admitted = model_path / "model-00001-of-00001.safetensors"
+            unadmitted = model_path / "model-99999-of-99999.safetensors"
+            mx.save_safetensors(str(admitted), {"weight": mx.array([1.0])})
+            mx.save_safetensors(str(unadmitted), {"weight": mx.array([9.0])})
+
+            weights = load_weights(model_path, weight_files=[admitted])
+            mx.eval(weights["weight"])
+
+            np.testing.assert_array_equal(np.array(weights["weight"]), [1.0])
+
+            with admitted.open("rb") as authenticated:
+                replacement = model_path / "replacement.safetensors"
+                mx.save_safetensors(
+                    str(replacement),
+                    {"weight": mx.array([7.0])},
+                )
+                replacement.replace(admitted)
+                bound_weights = load_weights(
+                    model_path,
+                    weight_files=[authenticated],
+                )
+                mx.eval(bound_weights["weight"])
+
+            np.testing.assert_array_equal(
+                np.array(bound_weights["weight"]),
+                [1.0],
+            )
+
+    def test_from_pretrained_forwards_explicit_weight_files(self):
+        _, model_type, _ = self._types()
+        admitted = Path("/authenticated/model-00001-of-00001.safetensors")
+
+        with TemporaryDirectory() as directory:
+            model_path = Path(directory)
+            (model_path / "config.json").write_text("{}", encoding="utf-8")
+            with (
+                patch.object(model_type, "_load_config", return_value=self._config()),
+                patch.object(model_type, "load_source_weights") as load_source,
+                patch(
+                    "mlx_audio.sts.models.raon.tts.load_weights", return_value={}
+                ) as load_selected,
+                patch("transformers.AutoTokenizer.from_pretrained", return_value=None),
+            ):
+                model_type.from_pretrained(
+                    str(model_path),
+                    weight_files=[admitted],
+                )
+
+        load_selected.assert_called_once_with(model_path, weight_files=[admitted])
+        load_source.assert_called_once_with({})
 
     def test_source_classification_rejects_unknown_root_and_supported_family(self):
         _, model_type, _ = self._types()
