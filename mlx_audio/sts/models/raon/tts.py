@@ -23,7 +23,7 @@ from mlx_audio.lm.models.base import create_attention_mask
 from mlx_audio.lm.models.cache import KVCache
 from mlx_audio.lm.models.qwen3 import ModelArgs as Qwen3ModelArgs
 from mlx_audio.lm.models.qwen3 import Qwen3Model
-from mlx_audio.lm.sample_utils import apply_top_k, apply_top_p
+from mlx_audio.lm.sample_utils import apply_top_p
 from mlx_audio.tts.models.base import GenerationResult
 from mlx_audio.utils import get_model_path, load_weights
 
@@ -234,6 +234,13 @@ def prepare_tts_prompt(tokenizer: Any, text: str) -> mx.array:
     return mx.array(input_ids, dtype=mx.int32)
 
 
+def _apply_source_top_k(logits: mx.array, top_k: int) -> mx.array:
+    if top_k <= 0 or top_k >= logits.shape[-1]:
+        return logits
+    cutoff = mx.sort(logits, axis=-1)[..., -top_k]
+    return mx.where(logits < cutoff[..., None], -mx.inf, logits)
+
+
 def _sample_logits(
     logits: mx.array,
     *,
@@ -243,7 +250,7 @@ def _sample_logits(
 ) -> mx.array:
     scores = logits.astype(mx.float32) / temperature
     if top_k:
-        scores = apply_top_k(scores, top_k)
+        scores = _apply_source_top_k(scores, top_k)
     logprobs = scores - mx.logsumexp(scores, axis=-1, keepdims=True)
     if top_p < 1:
         logprobs = apply_top_p(logprobs, top_p)
@@ -272,7 +279,6 @@ def make_first_code_sampler(
     if not 0 <= ras_repetition_threshold <= 1:
         raise ValueError("Raon TTS RAS repetition threshold must be in [0, 1].")
 
-    effective_top_k = min(top_k, audio_end_code) if top_k else 0
     history: list[int] = []
 
     def sample_first_code(logits: mx.array) -> mx.array:
@@ -280,6 +286,7 @@ def make_first_code_sampler(
             raise ValueError(
                 "Raon TTS first-code sampling currently requires batch size 1."
             )
+        effective_top_k = 0 if top_k >= logits.shape[-1] else top_k
         sampled = _sample_logits(
             logits,
             temperature=temperature,
