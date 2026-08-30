@@ -319,7 +319,7 @@ class RaonCodePredictor(nn.Module):
 
     def predict_codes(self, inputs_embeds: mx.array) -> mx.array:
         cache = self.model.make_cache()
-        current = inputs_embeds
+        current = inputs_embeds.astype(mx.float32)
         generated = []
         for step in range(self.num_code_groups - 1):
             hidden_states = self.model(current, cache=cache)
@@ -328,7 +328,7 @@ class RaonCodePredictor(nn.Module):
             generated.append(token)
             if step + 1 < self.num_code_groups - 1:
                 token = token + (step + 1) * self.config.vocab_size
-                current = self.codec_embedding(token)[:, None, :]
+                current = self.codec_embedding(token)[:, None, :].astype(mx.float32)
         return mx.stack(generated, axis=1)
 
 
