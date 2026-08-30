@@ -278,6 +278,38 @@ class TestRaonTextToSpeech(unittest.TestCase):
             audio_end_code=model.config.codebook_size,
         )
 
+    def test_public_generation_normalizes_null_sampling_controls(self):
+        _, model_type, _ = self._types()
+        model = model_type(self._config(), codec=_FakeCodec(8))
+        model.tokenizer = _FakeTokenizer()
+        result_type = getattr(raon_tts, "RaonTTSResult")
+
+        def finish_without_frames(input_ids, *, max_frames, first_code_sampler=None):
+            return result_type(
+                audio_codes=mx.zeros((1, 0, 3), dtype=mx.int32),
+                audio=mx.zeros((1, 1, 0), dtype=mx.float32),
+                finish_reason="audio_end",
+                steps=(),
+            )
+
+        model.generate_frames = finish_without_frames
+        with patch.object(
+            raon_tts,
+            "make_first_code_sampler",
+            wraps=raon_tts.make_first_code_sampler,
+        ) as make_first_code_sampler:
+            list(model.generate("hello", top_k=None, top_p=None))
+
+        make_first_code_sampler.assert_called_once_with(
+            temperature=1.2,
+            top_k=20,
+            top_p=0.8,
+            ras_enabled=True,
+            ras_window_size=50,
+            ras_repetition_threshold=0.5,
+            audio_end_code=model.config.codebook_size,
+        )
+
     def test_first_code_sampler_rescues_source_threshold_repetition(self):
         base_tokens = iter([3, 3, 3, 3])
         rescue_tokens = iter([7, 8])

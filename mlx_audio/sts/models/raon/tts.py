@@ -519,8 +519,8 @@ class RaonTTSModel(nn.Module):
         text: str,
         voice: Optional[str] = None,
         temperature: Optional[float] = None,
-        top_k: int = 20,
-        top_p: float = 0.8,
+        top_k: Optional[int] = 20,
+        top_p: Optional[float] = 0.8,
         ras_enabled: bool = True,
         ras_window_size: int = 50,
         ras_repetition_threshold: float = 0.5,
@@ -544,8 +544,8 @@ class RaonTTSModel(nn.Module):
         prompt = prepare_tts_prompt(self.tokenizer, text)
         first_code_sampler = make_first_code_sampler(
             temperature=1.2 if temperature is None else temperature,
-            top_k=top_k,
-            top_p=top_p,
+            top_k=20 if top_k is None else top_k,
+            top_p=0.8 if top_p is None else top_p,
             ras_enabled=ras_enabled,
             ras_window_size=ras_window_size,
             ras_repetition_threshold=ras_repetition_threshold,
