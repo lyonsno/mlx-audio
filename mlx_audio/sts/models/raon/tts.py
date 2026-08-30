@@ -273,6 +273,7 @@ class RaonDuplexFrameState:
     thinker_cache: list[KVCache]
     talker_cache: list[KVCache]
     machine_state: DuplexMachineState
+    forced_sil_remaining: int = 0
 
 
 @dataclass(frozen=True)
@@ -1055,8 +1056,18 @@ class RaonDuplexModel(RaonSpeechModel):
         if isinstance(selected, mx.array):
             if selected.size != 1:
                 raise ValueError("Raon duplex text sampler must return one token.")
-            return int(selected.item())
-        return int(selected)
+            selected_id = int(selected.item())
+        else:
+            selected_id = int(selected)
+        if not 0 <= selected_id < logits.shape[-1]:
+            raise ValueError(
+                f"Raon duplex text sampler selected out-of-range token {selected_id}."
+            )
+        if not bool(mx.isfinite(logits[0, -1, selected_id]).item()):
+            raise ValueError(
+                f"Raon duplex text sampler selected masked token {selected_id}."
+            )
+        return selected_id
 
     def _generate_duplex_codes(
         self,
@@ -1111,6 +1122,12 @@ class RaonDuplexModel(RaonSpeechModel):
             thinker_cache=state.thinker_cache,
             talker_cache=state.talker_cache,
             machine_state=machine_state,
+            forced_sil_remaining=(
+                state.forced_sil_remaining - 1
+                if forced_id == self.config.state.duplex_sil_token_id
+                and state.forced_sil_remaining
+                else state.forced_sil_remaining
+            ),
         )
         return RaonDuplexFrameResult(
             state=next_state,
@@ -1152,6 +1169,9 @@ class RaonDuplexModel(RaonSpeechModel):
             thinker_cache=thinker_cache,
             talker_cache=talker_cache,
             machine_state=self.state_manager.initial_state(speak_first=speak_first),
+            forced_sil_remaining=(
+                2 if not speak_first and self.config.state.use_sil_token else 0
+            ),
         )
         result = self._transition(
             state=state,
@@ -1229,6 +1249,11 @@ class RaonDuplexModel(RaonSpeechModel):
             text_logits=text_logits,
             text_sampler=text_sampler,
             first_code_sampler=first_code_sampler,
+            forced_id=(
+                self.config.state.duplex_sil_token_id
+                if state.forced_sil_remaining
+                else None
+            ),
         )
 
     @staticmethod
