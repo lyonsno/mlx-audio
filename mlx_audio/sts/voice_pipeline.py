@@ -439,11 +439,17 @@ class PocketTTSResponder:
     def create_generator(self, text: str) -> Iterable[Any]:
         kwargs: dict[str, Any] = {
             "text": text,
-            "voice": self.voice,
-            "stream": True,
-            "streaming_interval": self.streaming_interval,
+            "stream": bool(getattr(self.model, "supports_streaming", True)),
         }
+        if kwargs["stream"]:
+            kwargs["streaming_interval"] = self.streaming_interval
+        if bool(getattr(self.model, "supports_voice", True)):
+            kwargs["voice"] = self.voice
         if self.temperature is not None:
+            if not bool(getattr(self.model, "supports_temperature", True)):
+                raise ValueError(
+                    f"{type(self.model).__name__} does not support temperature."
+                )
             kwargs["temperature"] = self.temperature
         return iter(self.model.generate(**kwargs))
 

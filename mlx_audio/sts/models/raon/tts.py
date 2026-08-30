@@ -1,7 +1,8 @@
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional
+from typing import Any, Callable, Dict, Iterator, Literal, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -12,6 +13,7 @@ from mlx_audio.lm.models.base import create_attention_mask
 from mlx_audio.lm.models.cache import KVCache
 from mlx_audio.lm.models.qwen3 import ModelArgs as Qwen3ModelArgs
 from mlx_audio.lm.models.qwen3 import Qwen3Model
+from mlx_audio.tts.models.base import GenerationResult
 from mlx_audio.utils import get_model_path, load_weights
 
 from .components import RaonComponentConfig, RaonSpeechComponents
@@ -183,6 +185,14 @@ class RaonTTSModel(nn.Module):
         "proj_code.",
         "code_predictor.",
     )
+    _EXCLUDED_SOURCE_FAMILIES = {
+        "audio_encoder.": "TTS-only loading excludes the speech-input encoder.",
+        "input_adaptor.": "TTS-only loading excludes the speech-input adaptor.",
+        "speaker_encoder.": "Speaker conditioning is not implemented by this TTS path.",
+    }
+    supports_streaming = False
+    supports_voice = False
+    supports_temperature = False
 
     def __init__(self, config: RaonTTSConfig, codec: Optional[Any] = None):
         super().__init__()
@@ -201,6 +211,12 @@ class RaonTTSModel(nn.Module):
             )
         )
         self.tokenizer = None
+        self.max_frames = 512
+        self.weight_admission: Optional[Dict[str, Any]] = None
+
+    @property
+    def sample_rate(self) -> int:
+        return int(self.codec.sample_rate)
 
     def feedback_embedding(self, audio_codes: mx.array) -> mx.array:
         if audio_codes.ndim != 3:
@@ -227,7 +243,7 @@ class RaonTTSModel(nn.Module):
         talker_hidden = self.speech.talker(talker_inputs, cache=talker_cache)
         return talker_hidden, text_logits
 
-    def generate(
+    def generate_frames(
         self,
         input_ids: mx.array,
         *,
@@ -305,12 +321,100 @@ class RaonTTSModel(nn.Module):
             steps=tuple(steps),
         )
 
-    def generate_text(self, text: str, *, max_frames: int) -> RaonTTSResult:
+    def generate_text_frames(self, text: str, *, max_frames: int) -> RaonTTSResult:
         if self.tokenizer is None:
             raise RuntimeError("Raon tokenizer is not loaded.")
-        return self.generate(
+        return self.generate_frames(
             prepare_tts_prompt(self.tokenizer, text),
             max_frames=max_frames,
+        )
+
+    def _finalize_waveform(self, result: RaonTTSResult) -> mx.array:
+        raw = result.audio
+        if raw.ndim != 3 or raw.shape[0] != 1 or raw.shape[1] != 1:
+            raise ValueError(
+                "Raon Mimi decode must return shape (1, 1, samples), "
+                f"got {raw.shape}."
+            )
+        samples_per_frame = int(self.sample_rate / self.codec.frame_rate)
+        valid_samples = int(result.audio_codes.shape[1]) * samples_per_frame
+        waveform = raw[0, 0, : min(valid_samples, int(raw.shape[-1]))]
+        if waveform.shape[0] <= samples_per_frame:
+            return waveform[:0]
+        return waveform[:-samples_per_frame]
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        milliseconds = int(seconds * 1000)
+        hours, milliseconds = divmod(milliseconds, 3_600_000)
+        minutes, milliseconds = divmod(milliseconds, 60_000)
+        whole_seconds, milliseconds = divmod(milliseconds, 1000)
+        return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
+
+    def generate(
+        self,
+        text: str,
+        voice: Optional[str] = None,
+        temperature: Optional[float] = None,
+        stream: bool = False,
+        streaming_interval: float = 2.0,
+        max_frames: Optional[int] = None,
+        **_: Any,
+    ) -> Iterator[GenerationResult]:
+        """Generate one source-finalized result through MLX Audio's TTS protocol."""
+        if voice is not None:
+            raise ValueError("Raon TTS does not yet support voice conditioning.")
+        if temperature is not None:
+            raise ValueError("Raon TTS currently supports greedy generation only.")
+        if stream:
+            raise ValueError(
+                "Raon TTS does not yet support incremental audio streaming."
+            )
+        _ = streaming_interval
+        if self.tokenizer is None:
+            raise RuntimeError("Raon tokenizer is not loaded.")
+
+        effective_max_frames = self.max_frames if max_frames is None else max_frames
+        prompt = prepare_tts_prompt(self.tokenizer, text)
+        started = time.perf_counter()
+        result = self.generate_frames(prompt, max_frames=effective_max_frames)
+        waveform = self._finalize_waveform(result)
+        mx.eval(waveform)
+        elapsed = time.perf_counter() - started
+        samples = int(waveform.shape[0])
+        duration_seconds = samples / self.sample_rate if self.sample_rate else 0.0
+        generated_frames = int(result.audio_codes.shape[1])
+        yield GenerationResult(
+            audio=waveform,
+            samples=samples,
+            sample_rate=self.sample_rate,
+            segment_idx=0,
+            token_count=generated_frames,
+            audio_duration=self._format_duration(duration_seconds),
+            real_time_factor=(duration_seconds / elapsed if elapsed > 0 else 0.0),
+            prompt={
+                "text": text,
+                "tokens": int(prompt.shape[0]),
+                "finish_reason": result.finish_reason,
+                "first_codes": [step.first_code for step in result.steps],
+                "thinker_cache_offsets": [
+                    step.thinker_cache_offset for step in result.steps
+                ],
+                "talker_cache_offsets": [
+                    step.talker_cache_offset for step in result.steps
+                ],
+            },
+            audio_samples={
+                "samples": samples,
+                "frames": generated_frames,
+                "samples-per-sec": (
+                    round(samples / elapsed, 2) if elapsed > 0 else 0.0
+                ),
+            },
+            processing_time_seconds=elapsed,
+            peak_memory_usage=mx.get_peak_memory() / 1e9,
+            is_streaming_chunk=False,
+            is_final_chunk=True,
         )
 
     def validate_source_families(self, weights: Dict[str, mx.array]) -> None:
@@ -321,6 +425,83 @@ class RaonTTSModel(nn.Module):
         ]
         if missing:
             raise ValueError(f"Raon TTS missing source families: {missing}.")
+
+    def classify_source_weights(self, weights: Dict[str, mx.array]) -> Dict[str, Any]:
+        excluded_names: Dict[str, list[str]] = {
+            prefix: [] for prefix in self._EXCLUDED_SOURCE_FAMILIES
+        }
+        supported: Dict[str, mx.array] = {}
+        unknown_roots = []
+        for name, value in weights.items():
+            excluded_prefix = next(
+                (
+                    prefix
+                    for prefix in self._EXCLUDED_SOURCE_FAMILIES
+                    if name.startswith(prefix)
+                ),
+                None,
+            )
+            if excluded_prefix is not None:
+                excluded_names[excluded_prefix].append(name)
+            elif name.startswith(self._REQUIRED_SOURCE_FAMILIES):
+                supported[name] = value
+            else:
+                unknown_roots.append(name)
+        if unknown_roots:
+            raise ValueError(
+                "Raon TTS has unclassified source tensors: " f"{sorted(unknown_roots)}."
+            )
+
+        mapped = self.sanitize(supported)
+        qkv_groups: Dict[str, set[str]] = {}
+        for name in supported:
+            if not name.startswith("audio_tokenizer."):
+                continue
+            for projection in ("q_proj", "k_proj", "v_proj"):
+                suffix = f".{projection}.weight"
+                if name.endswith(suffix):
+                    group = name.removesuffix(suffix)
+                    qkv_groups.setdefault(group, set()).add(projection)
+                    break
+        incomplete_qkv = {
+            group: sorted(projections)
+            for group, projections in qkv_groups.items()
+            if projections != {"q_proj", "k_proj", "v_proj"}
+        }
+        if incomplete_qkv:
+            raise ValueError(
+                f"Raon TTS incomplete Mimi QKV source groups: {incomplete_qkv}."
+            )
+        fused_source_reduction = 2 * len(qkv_groups)
+        expected_target_count = len(supported) - fused_source_reduction
+        if len(mapped) != expected_target_count:
+            raise ValueError(
+                "Raon TTS has unclassified source tensors inside supported families: "
+                f"supported={len(supported)}, fused_reduction={fused_source_reduction}, "
+                f"mapped={len(mapped)}, expected_mapped={expected_target_count}."
+            )
+
+        excluded_counts = {
+            prefix: len(names) for prefix, names in excluded_names.items() if names
+        }
+        return {
+            "source_tensor_count": len(weights),
+            "mapped_source_tensor_count": len(supported),
+            "admitted_target_count": len(mapped),
+            "fused_source_reduction": fused_source_reduction,
+            "excluded_source_count": sum(excluded_counts.values()),
+            "excluded_families": excluded_counts,
+            "excluded_reasons": {
+                prefix: self._EXCLUDED_SOURCE_FAMILIES[prefix]
+                for prefix in excluded_counts
+            },
+            "excluded_source_names": {
+                prefix: sorted(names)
+                for prefix, names in excluded_names.items()
+                if names
+            },
+            "unclassified_source_count": 0,
+        }
 
     @staticmethod
     def sanitize(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
@@ -356,11 +537,15 @@ class RaonTTSModel(nn.Module):
                 for name, value in RaonSpeechComponents.sanitize(speech_source).items()
             }
         )
-        codec = Mimi.sanitize_transformers_weights(weights, prefix="audio_tokenizer.")
-        mapped.update({f"codec.{name}": value for name, value in codec.items()})
+        if any(name.startswith("audio_tokenizer.") for name in weights):
+            codec = Mimi.sanitize_transformers_weights(
+                weights, prefix="audio_tokenizer."
+            )
+            mapped.update({f"codec.{name}": value for name, value in codec.items()})
         return mapped
 
-    def load_source_weights(self, weights: Dict[str, mx.array]) -> Dict[str, int]:
+    def load_source_weights(self, weights: Dict[str, mx.array]) -> Dict[str, Any]:
+        receipt = self.classify_source_weights(weights)
         self.validate_source_families(weights)
         mapped = self.sanitize(weights)
         expected = {name for name, _ in tree_flatten(self.parameters())}
@@ -375,7 +560,9 @@ class RaonTTSModel(nn.Module):
         self.load_weights(list(mapped.items()), strict=True)
         if isinstance(self.codec, Mimi):
             self.codec._finalize_loaded_weights(self.codec)
-        return {"expected": len(expected), "admitted": len(received)}
+        receipt.update({"expected": len(expected), "admitted": len(received)})
+        self.weight_admission = receipt
+        return receipt
 
     @classmethod
     def from_pretrained(
