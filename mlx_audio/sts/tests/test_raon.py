@@ -1,7 +1,9 @@
 import unittest
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
+from mlx.utils import tree_flatten
 
 import mlx_audio.sts.models.raon as raon
 from mlx_audio.sts.models.raon import (
@@ -248,6 +250,36 @@ class TestRaonSpeechComponents(unittest.TestCase):
 
         self.assertEqual(first.shape, (1, 3))
         np.testing.assert_array_equal(np.array(first), np.array(second))
+
+    def test_code_predictor_promotes_activations_without_expanding_weights(self):
+        class RecordingCore(nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+                self.input_dtypes = []
+
+            def make_cache(self):
+                return self.inner.make_cache()
+
+            def __call__(self, inputs_embeds, cache=None):
+                self.input_dtypes.append(inputs_embeds.dtype)
+                return self.inner(inputs_embeds, cache=cache)
+
+        _, components_type, _ = self._component_types()
+        model = components_type(self._tiny_config())
+        model.code_predictor.set_dtype(mx.bfloat16)
+        recording = RecordingCore(model.code_predictor.model)
+        model.code_predictor.model = recording
+        inputs = mx.arange(16, dtype=mx.bfloat16).reshape(1, 2, 8) / 16
+
+        codes = model.code_predictor.predict_codes(inputs)
+        mx.eval(codes)
+
+        self.assertEqual(recording.input_dtypes, [mx.float32, mx.float32])
+        parameter_dtypes = {
+            value.dtype for _, value in tree_flatten(model.code_predictor.parameters())
+        }
+        self.assertEqual(parameter_dtypes, {mx.bfloat16})
 
     def test_talker_rejects_explicit_attention_mask_with_nonempty_cache(self):
         _, components_type, _ = self._component_types()
