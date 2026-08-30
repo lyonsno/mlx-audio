@@ -17,14 +17,18 @@ from mlx_audio.tts.models.base import GenerationResult
 from mlx_audio.utils import get_model_path, load_weights
 
 from .components import RaonComponentConfig, RaonSpeechComponents
-from .duplex import AUDIO_OUTPUT_PLACEHOLDER_ID, AUDIO_START_ID
+from .duplex import (
+    AUDIO_INPUT_PLACEHOLDER_ID,
+    AUDIO_OUTPUT_PLACEHOLDER_ID,
+    AUDIO_START_ID,
+)
 
 AUDIO_END_ID = 151670
 IM_END_ID = 151645
 
 
 @dataclass(frozen=True)
-class RaonOutputAdaptorConfig:
+class RaonEmbeddingAdaptorConfig:
     input_size: int
     output_size: int
     hidden_size: int
@@ -32,9 +36,10 @@ class RaonOutputAdaptorConfig:
     output_time_scale: float
     use_post_norm: bool
     norm_eps: float
+    post_norm_init_scale: float
 
     @classmethod
-    def from_dict(cls, values: Dict[str, Any]) -> "RaonOutputAdaptorConfig":
+    def from_dict(cls, values: Dict[str, Any]) -> "RaonEmbeddingAdaptorConfig":
         config = cls(
             input_size=int(values["input_size"]),
             output_size=int(values["output_size"]),
@@ -43,6 +48,7 @@ class RaonOutputAdaptorConfig:
             output_time_scale=float(values.get("output_time_scale", 1)),
             use_post_norm=bool(values.get("use_post_norm", False)),
             norm_eps=float(values.get("norm_eps", 1e-6)),
+            post_norm_init_scale=float(values.get("post_norm_init_scale", 1.0)),
         )
         if config.num_layers != 2 or config.output_time_scale != 1:
             raise ValueError(
@@ -50,6 +56,9 @@ class RaonOutputAdaptorConfig:
                 "output_time_scale=1."
             )
         return config
+
+
+RaonOutputAdaptorConfig = RaonEmbeddingAdaptorConfig
 
 
 @dataclass(frozen=True)
@@ -83,8 +92,42 @@ class RaonTTSConfig:
         )
 
 
-class RaonOutputAdaptor(nn.Module):
-    def __init__(self, config: RaonOutputAdaptorConfig):
+@dataclass(frozen=True)
+class RaonSpeechConfig(RaonTTSConfig):
+    input_adaptor: RaonEmbeddingAdaptorConfig
+
+    @classmethod
+    def from_dict(cls, values: Dict[str, Any]) -> "RaonSpeechConfig":
+        base = RaonTTSConfig.from_dict(values)
+        input_adaptor = RaonEmbeddingAdaptorConfig.from_dict(
+            values["input_adaptor_config"]
+        )
+        if (
+            input_adaptor.input_size
+            != base.components.audio_encoder.stacked_output_size
+        ):
+            raise ValueError(
+                "Raon input adaptor size must match the Voxtral stacked output: "
+                f"{input_adaptor.input_size} != "
+                f"{base.components.audio_encoder.stacked_output_size}."
+            )
+        if input_adaptor.output_size != base.thinker.hidden_size:
+            raise ValueError(
+                "Raon input adaptor output must match the thinker hidden size: "
+                f"{input_adaptor.output_size} != {base.thinker.hidden_size}."
+            )
+        return cls(
+            thinker=base.thinker,
+            components=base.components,
+            output_adaptor=base.output_adaptor,
+            num_quantizers=base.num_quantizers,
+            codebook_size=base.codebook_size,
+            input_adaptor=input_adaptor,
+        )
+
+
+class RaonEmbeddingAdaptor(nn.Module):
+    def __init__(self, config: RaonEmbeddingAdaptorConfig):
         super().__init__()
         self.linear_fc1 = nn.Linear(config.input_size, config.hidden_size, bias=False)
         self.linear_fc2 = nn.Linear(config.hidden_size, config.output_size, bias=False)
@@ -93,12 +136,19 @@ class RaonOutputAdaptor(nn.Module):
             if config.use_post_norm
             else None
         )
+        if self.post_norm is not None:
+            self.post_norm.weight = mx.full(
+                (config.output_size,), config.post_norm_init_scale
+            )
 
     def __call__(self, inputs: mx.array) -> mx.array:
         outputs = self.linear_fc2(nn.gelu(self.linear_fc1(inputs)))
         if self.post_norm is not None:
             outputs = self.post_norm(outputs)
         return outputs
+
+
+RaonOutputAdaptor = RaonEmbeddingAdaptor
 
 
 class RaonThinker(nn.Module):
@@ -193,6 +243,7 @@ class RaonTTSModel(nn.Module):
     supports_streaming = False
     supports_voice = False
     supports_temperature = False
+    _SUPPORTS_AUDIO_INPUT = False
 
     def __init__(self, config: RaonTTSConfig, codec: Optional[Any] = None):
         super().__init__()
@@ -203,7 +254,8 @@ class RaonTTSModel(nn.Module):
         )
         self.output_adaptor = RaonOutputAdaptor(config.output_adaptor)
         self.speech = RaonSpeechComponents(config.components)
-        self.speech.audio_encoder = None
+        if not self._SUPPORTS_AUDIO_INPUT:
+            self.speech.audio_encoder = None
         self.codec = codec or Mimi(
             mimi_202407(
                 config.num_quantizers,
@@ -589,3 +641,155 @@ class RaonTTSModel(nn.Module):
     @staticmethod
     def _load_config(values: Dict[str, Any]) -> RaonTTSConfig:
         return RaonTTSConfig.from_dict(values)
+
+
+class RaonSpeechModel(RaonTTSModel):
+    """Raon speech-input boundary through source-compatible thinker prefill."""
+
+    _REQUIRED_SOURCE_FAMILIES = RaonTTSModel._REQUIRED_SOURCE_FAMILIES + (
+        "audio_encoder.",
+        "input_adaptor.",
+    )
+    _EXCLUDED_SOURCE_FAMILIES = {
+        "speaker_encoder.": (
+            "Speaker conditioning is not implemented by the speech-input path."
+        ),
+    }
+    _SUPPORTS_AUDIO_INPUT = True
+
+    def __init__(self, config: RaonSpeechConfig, codec: Optional[Any] = None):
+        super().__init__(config, codec=codec)
+        self.config = config
+        self.input_adaptor = RaonEmbeddingAdaptor(config.input_adaptor)
+
+    def adapt_audio_embeddings(
+        self,
+        encoded: mx.array,
+        mask: Optional[mx.array] = None,
+    ) -> tuple[mx.array, mx.array]:
+        if encoded.ndim != 3:
+            raise ValueError(
+                "Raon Voxtral embeddings must have shape (batch, frames, dimension)."
+            )
+        if encoded.shape[-1] != self.config.input_adaptor.input_size:
+            raise ValueError(
+                "Raon Voxtral embedding size does not match the input adaptor: "
+                f"{encoded.shape[-1]} != {self.config.input_adaptor.input_size}."
+            )
+        if mask is None:
+            mask = mx.ones(encoded.shape[:2], dtype=mx.bool_)
+        if mask.ndim != 2 or mask.shape != encoded.shape[:2]:
+            raise ValueError(
+                "Raon audio embedding mask must match the batch and frame axes: "
+                f"mask={mask.shape}, embeddings={encoded.shape}."
+            )
+        return self.input_adaptor(encoded), mask.astype(mx.bool_)
+
+    def get_audio_input_embeds(
+        self,
+        mel: mx.array,
+        mask: Optional[mx.array] = None,
+    ) -> tuple[mx.array, mx.array]:
+        encoded = self.speech.encode_audio_features(mel)
+        return self.adapt_audio_embeddings(encoded, mask)
+
+    def prepare_speech_embeddings(
+        self,
+        input_ids: mx.array,
+        audio_input_embeds: mx.array,
+        audio_input_embeds_mask: mx.array,
+    ) -> mx.array:
+        if input_ids.ndim != 2:
+            raise ValueError("Raon speech input IDs must have shape (batch, sequence).")
+        if audio_input_embeds.ndim != 3:
+            raise ValueError(
+                "Raon audio input embeddings must have shape "
+                "(batch, frames, hidden_size)."
+            )
+        if audio_input_embeds.shape[0] != input_ids.shape[0]:
+            raise ValueError("Raon speech input batch dimensions must match.")
+        if audio_input_embeds.shape[-1] != self.config.thinker.hidden_size:
+            raise ValueError(
+                "Raon audio input embedding size must match the thinker hidden size."
+            )
+        if (
+            audio_input_embeds_mask.ndim != 2
+            or audio_input_embeds_mask.shape != audio_input_embeds.shape[:2]
+        ):
+            raise ValueError(
+                "Raon audio input mask must match the batch and frame axes."
+            )
+
+        inputs_embeds = self.thinker.embed_tokens(input_ids)
+        hidden_size = int(inputs_embeds.shape[-1])
+        placeholder_mask = (input_ids == AUDIO_INPUT_PLACEHOLDER_ID).reshape(-1)
+        valid_audio_mask = audio_input_embeds_mask.astype(mx.bool_).reshape(-1)
+        placeholder_count = int(mx.sum(placeholder_mask).item())
+        valid_audio_count = int(mx.sum(valid_audio_mask).item())
+        if placeholder_count != valid_audio_count:
+            raise ValueError(
+                "Raon audio placeholder count must match valid audio frames: "
+                f"placeholders={placeholder_count}, valid_frames={valid_audio_count}."
+            )
+
+        flat_inputs = inputs_embeds.reshape(-1, hidden_size)
+        flat_audio = audio_input_embeds.reshape(-1, hidden_size)
+        input_indices = mx.arange(flat_inputs.shape[0])
+        audio_indices = mx.arange(flat_audio.shape[0])
+        placeholder_positions = mx.sort(
+            mx.where(placeholder_mask, input_indices, flat_inputs.shape[0])
+        )[:placeholder_count]
+        valid_audio_positions = mx.sort(
+            mx.where(valid_audio_mask, audio_indices, flat_audio.shape[0])
+        )[:valid_audio_count]
+        valid_audio = flat_audio[valid_audio_positions].astype(inputs_embeds.dtype)
+        current = flat_inputs[placeholder_positions]
+        flat_inputs = flat_inputs.at[placeholder_positions].add(valid_audio - current)
+        return flat_inputs.reshape(inputs_embeds.shape)
+
+    def prefill_speech(
+        self,
+        input_ids: mx.array,
+        audio_input_embeds: mx.array,
+        audio_input_embeds_mask: mx.array,
+        *,
+        cache: Optional[list[KVCache]] = None,
+    ) -> tuple[mx.array, mx.array]:
+        inputs_embeds = self.prepare_speech_embeddings(
+            input_ids,
+            audio_input_embeds,
+            audio_input_embeds_mask,
+        )
+        return self.thinker(
+            input_ids,
+            cache=cache,
+            input_embeddings=inputs_embeds,
+        )
+
+    @staticmethod
+    def sanitize(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        mapped = RaonTTSModel.sanitize(weights)
+        audio_encoder = {
+            name: value
+            for name, value in weights.items()
+            if name.startswith("audio_encoder.")
+        }
+        mapped.update(
+            {
+                f"speech.{name}": value
+                for name, value in RaonSpeechComponents.sanitize(audio_encoder).items()
+            }
+        )
+        input_adaptor_names = {
+            "input_adaptor.proj.0.weight": "input_adaptor.linear_fc1.weight",
+            "input_adaptor.proj.2.weight": "input_adaptor.linear_fc2.weight",
+            "input_adaptor.post_norm.weight": "input_adaptor.post_norm.weight",
+        }
+        for source_name, target_name in input_adaptor_names.items():
+            if source_name in weights:
+                mapped[target_name] = weights[source_name]
+        return mapped
+
+    @staticmethod
+    def _load_config(values: Dict[str, Any]) -> RaonSpeechConfig:
+        return RaonSpeechConfig.from_dict(values)

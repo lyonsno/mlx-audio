@@ -57,8 +57,9 @@ class TestRaonTextToSpeech(unittest.TestCase):
         self.assertEqual(missing, [], f"Raon TTS integration API is missing: {missing}")
         return tuple(getattr(raon, name) for name in names)
 
-    def _config(self):
-        config_type, _, _ = self._types()
+    def _config(self, config_type=None):
+        if config_type is None:
+            config_type, _, _ = self._types()
         return config_type.from_dict(
             {
                 "text_model_config": {
@@ -125,6 +126,16 @@ class TestRaonTextToSpeech(unittest.TestCase):
                     "num_layers": 2,
                     "output_time_scale": 1,
                     "use_post_norm": True,
+                    "norm_eps": 1e-6,
+                },
+                "input_adaptor_config": {
+                    "input_size": 16,
+                    "output_size": 8,
+                    "hidden_size": 8,
+                    "num_layers": 2,
+                    "output_time_scale": 1,
+                    "use_post_norm": True,
+                    "post_norm_init_scale": 0.02,
                     "norm_eps": 1e-6,
                 },
                 "thinker_to_talker_projection_mode": "mlp",
@@ -257,6 +268,144 @@ class TestRaonTextToSpeech(unittest.TestCase):
             },
         )
         self.assertEqual(receipt["unclassified_source_count"], 0)
+
+    def test_speech_conditioning_adapts_voxtral_frames_and_preserves_mask(self):
+        names = ("RaonSpeechConfig", "RaonSpeechModel")
+        missing = [name for name in names if not hasattr(raon, name)]
+        self.assertEqual(
+            missing,
+            [],
+            f"Raon speech-conditioning API is missing: {missing}",
+        )
+        config_type, model_type = (getattr(raon, name) for name in names)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        encoded = mx.arange(2 * 3 * 16, dtype=mx.float32).reshape(2, 3, 16) / 100
+        mask = mx.array([[True, True, False], [True, False, False]])
+
+        adapted, output_mask = model.adapt_audio_embeddings(encoded, mask)
+        mx.eval(adapted, output_mask)
+
+        self.assertEqual(adapted.shape, (2, 3, 8))
+        np.testing.assert_array_equal(np.array(output_mask), np.array(mask))
+        self.assertIsNotNone(model.speech.audio_encoder)
+
+    def test_speech_conditioning_composes_voxtral_through_input_adaptor(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        mel = mx.arange(128 * 12, dtype=mx.float32).reshape(1, 128, 12) / 1000
+
+        adapted, mask = model.get_audio_input_embeds(mel)
+        mx.eval(adapted, mask)
+
+        self.assertEqual(adapted.ndim, 3)
+        self.assertEqual(adapted.shape[0], 1)
+        self.assertEqual(adapted.shape[-1], 8)
+        self.assertEqual(mask.shape, adapted.shape[:2])
+        self.assertTrue(np.array(mask).all())
+
+    def test_speech_conditioning_inserts_only_valid_audio_frames(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        model.thinker.embed_tokens.weight = mx.zeros_like(
+            model.thinker.embed_tokens.weight
+        )
+        first = mx.arange(1, 9, dtype=mx.float32)
+        second = mx.arange(11, 19, dtype=mx.float32)
+        ignored = mx.arange(21, 29, dtype=mx.float32)
+        audio = mx.stack([first, second, ignored])[None]
+        input_ids = mx.array(
+            [[7, raon.AUDIO_INPUT_PLACEHOLDER_ID, 8, raon.AUDIO_INPUT_PLACEHOLDER_ID]]
+        )
+
+        embeddings = model.prepare_speech_embeddings(
+            input_ids,
+            audio,
+            mx.array([[True, True, False]]),
+        )
+        mx.eval(embeddings)
+
+        expected = np.zeros((1, 4, 8), dtype=np.float32)
+        expected[0, 1] = np.arange(1, 9, dtype=np.float32)
+        expected[0, 3] = np.arange(11, 19, dtype=np.float32)
+        np.testing.assert_array_equal(np.array(embeddings), expected)
+
+    def test_speech_conditioning_rejects_placeholder_count_mismatch(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        input_ids = mx.array([[raon.AUDIO_INPUT_PLACEHOLDER_ID, 7]])
+        audio = mx.zeros((1, 2, 8))
+
+        with self.assertRaisesRegex(ValueError, "placeholder count"):
+            model.prepare_speech_embeddings(
+                input_ids,
+                audio,
+                mx.array([[True, True]]),
+            )
+
+    def test_speech_conditioned_prefill_advances_cache_across_inserted_audio(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        mx.random.seed(29)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        input_ids = mx.array([[7, raon.AUDIO_INPUT_PLACEHOLDER_ID, 8]])
+        audio = mx.arange(8, dtype=mx.float32).reshape(1, 1, 8) / 10
+        cache = model.thinker.make_cache()
+
+        accepted, normalized = model.prefill_speech(
+            input_ids,
+            audio,
+            mx.array([[True]]),
+            cache=cache,
+        )
+        mx.eval(accepted, normalized)
+
+        self.assertEqual(accepted.shape, (1, 3, 8))
+        self.assertEqual(normalized.shape, (1, 3, 8))
+        self.assertEqual([layer.offset for layer in cache], [3, 3])
+        self.assertTrue(np.isfinite(np.array(normalized)).all())
+
+    def test_speech_source_classification_rejects_unknown_input_adaptor_member(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+
+        with self.assertRaisesRegex(ValueError, "inside supported families"):
+            model.classify_source_weights(
+                {"input_adaptor.unrecognized": mx.zeros((1,))}
+            )
+
+    def test_speech_source_sanitize_maps_all_input_adaptor_members(self):
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(model_type)
+        weights = {
+            "input_adaptor.proj.0.weight": mx.zeros((8, 16)),
+            "input_adaptor.proj.2.weight": mx.zeros((8, 8)),
+            "input_adaptor.post_norm.weight": mx.zeros((8,)),
+        }
+
+        mapped = model_type.sanitize(weights)
+
+        self.assertEqual(
+            set(mapped),
+            {
+                "input_adaptor.linear_fc1.weight",
+                "input_adaptor.linear_fc2.weight",
+                "input_adaptor.post_norm.weight",
+            },
+        )
 
 
 if __name__ == "__main__":
