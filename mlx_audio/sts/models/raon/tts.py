@@ -2,7 +2,17 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Literal, Optional
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Dict,
+    Iterator,
+    Literal,
+    Optional,
+    Sequence,
+    Union,
+)
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -622,12 +632,15 @@ class RaonTTSModel(nn.Module):
         path_or_repo: str,
         *,
         revision: Optional[str] = None,
+        weight_files: Optional[Sequence[Union[str, Path, BinaryIO]]] = None,
     ) -> "RaonTTSModel":
         model_path = get_model_path(path_or_repo, revision=revision)
         with open(Path(model_path) / "config.json", encoding="utf-8") as handle:
             config = cls._load_config(json.load(handle))
         model = cls(config)
-        model.load_source_weights(load_weights(Path(model_path)))
+        model.load_source_weights(
+            load_weights(Path(model_path), weight_files=weight_files)
+        )
         mx.eval(model.parameters())
 
         from transformers import AutoTokenizer
