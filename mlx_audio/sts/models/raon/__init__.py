@@ -1,3 +1,8 @@
+from .components import (
+    RaonComponentConfig,
+    RaonSpeechComponents,
+    RaonVoxtralEncoderConfig,
+)
 from .duplex import (
     AUDIO_INPUT_PLACEHOLDER_ID,
     AUDIO_OUTPUT_BACKCHANNEL_ID,
@@ -24,4 +29,7 @@ __all__ = [
     "DuplexPhase",
     "DuplexStateConfig",
     "DuplexStateManager",
+    "RaonComponentConfig",
+    "RaonSpeechComponents",
+    "RaonVoxtralEncoderConfig",
 ]
