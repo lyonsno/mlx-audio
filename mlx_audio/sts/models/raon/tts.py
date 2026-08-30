@@ -722,15 +722,25 @@ class RaonSpeechModel(RaonTTSModel):
 
         inputs_embeds = self.thinker.embed_tokens(input_ids)
         hidden_size = int(inputs_embeds.shape[-1])
-        placeholder_mask = (input_ids == AUDIO_INPUT_PLACEHOLDER_ID).reshape(-1)
-        valid_audio_mask = audio_input_embeds_mask.astype(mx.bool_).reshape(-1)
+        placeholder_mask_by_row = input_ids == AUDIO_INPUT_PLACEHOLDER_ID
+        valid_audio_mask_by_row = audio_input_embeds_mask.astype(mx.bool_)
+        placeholder_counts = mx.sum(placeholder_mask_by_row, axis=1)
+        valid_audio_counts = mx.sum(valid_audio_mask_by_row, axis=1)
+        mx.eval(placeholder_counts, valid_audio_counts)
+        for batch_row in range(input_ids.shape[0]):
+            row_placeholder_count = int(placeholder_counts[batch_row].item())
+            row_valid_audio_count = int(valid_audio_counts[batch_row].item())
+            if row_placeholder_count != row_valid_audio_count:
+                raise ValueError(
+                    "Raon audio placeholder count must match valid audio frames in "
+                    f"batch row {batch_row}: placeholders={row_placeholder_count}, "
+                    f"valid_frames={row_valid_audio_count}."
+                )
+
+        placeholder_mask = placeholder_mask_by_row.reshape(-1)
+        valid_audio_mask = valid_audio_mask_by_row.reshape(-1)
         placeholder_count = int(mx.sum(placeholder_mask).item())
         valid_audio_count = int(mx.sum(valid_audio_mask).item())
-        if placeholder_count != valid_audio_count:
-            raise ValueError(
-                "Raon audio placeholder count must match valid audio frames: "
-                f"placeholders={placeholder_count}, valid_frames={valid_audio_count}."
-            )
 
         flat_inputs = inputs_embeds.reshape(-1, hidden_size)
         flat_audio = audio_input_embeds.reshape(-1, hidden_size)

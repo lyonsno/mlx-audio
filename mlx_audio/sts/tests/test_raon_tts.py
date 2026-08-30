@@ -351,6 +351,27 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 mx.array([[True, True]]),
             )
 
+    def test_speech_conditioning_rejects_compensating_batch_mismatches(self):
+        config_type = getattr(raon, "RaonSpeechConfig", None)
+        model_type = getattr(raon, "RaonSpeechModel", None)
+        self.assertIsNotNone(config_type)
+        self.assertIsNotNone(model_type)
+        model = model_type(self._config(config_type), codec=_FakeCodec(8))
+        input_ids = mx.array(
+            [
+                [raon.AUDIO_INPUT_PLACEHOLDER_ID, 7],
+                [raon.AUDIO_INPUT_PLACEHOLDER_ID, 8],
+            ]
+        )
+        audio = mx.zeros((2, 2, 8))
+
+        with self.assertRaisesRegex(ValueError, "batch row 0"):
+            model.prepare_speech_embeddings(
+                input_ids,
+                audio,
+                mx.array([[True, True], [False, False]]),
+            )
+
     def test_speech_conditioned_prefill_advances_cache_across_inserted_audio(self):
         config_type = getattr(raon, "RaonSpeechConfig", None)
         model_type = getattr(raon, "RaonSpeechModel", None)
