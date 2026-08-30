@@ -169,13 +169,63 @@ class TestRaonSpeechComponents(unittest.TestCase):
     def test_voxtral_boundary_emits_unprojected_frame_stacks(self):
         _, components_type, _ = self._component_types()
         model = components_type(self._tiny_config())
-        mel = mx.arange(128 * 12, dtype=mx.float32).reshape(128, 12) / 1000
+        mel = mx.arange(128 * 12, dtype=mx.float32).reshape(1, 128, 12) / 1000
 
         encoded = model.encode_audio_features(mel)
         mx.eval(encoded)
 
-        self.assertEqual(encoded.ndim, 2)
+        self.assertEqual(encoded.ndim, 3)
+        self.assertEqual(encoded.shape[0], 1)
         self.assertEqual(encoded.shape[-1], 16)
+
+    def test_voxtral_boundary_preserves_batch_and_example_isolation(self):
+        _, components_type, _ = self._component_types()
+        model = components_type(self._tiny_config())
+        first = mx.arange(128 * 12, dtype=mx.float32).reshape(128, 12) / 1000
+        second = first * 0.5 + 0.125
+        batch = mx.stack([first, second])
+
+        together = model.encode_audio_features(batch)
+        isolated = mx.concatenate(
+            [
+                model.encode_audio_features(first[None]),
+                model.encode_audio_features(second[None]),
+            ],
+            axis=0,
+        )
+        mx.eval(together, isolated)
+
+        self.assertEqual(together.shape, isolated.shape)
+        self.assertEqual(together.shape[0], 2)
+        np.testing.assert_allclose(
+            np.array(together), np.array(isolated), rtol=1e-5, atol=1e-5
+        )
+
+    def test_voxtral_attention_uses_pinned_split_half_rope(self):
+        _, components_type, _ = self._component_types()
+        model = components_type(self._tiny_config())
+        attention = model.audio_encoder.encoder.transformer_layers[0].attention
+        apply_rope = getattr(attention, "apply_rope", None)
+        self.assertTrue(
+            callable(apply_rope),
+            "The effective Voxtral attention route must expose its rotary operation.",
+        )
+        values = mx.arange(1 * 2 * 3 * 4, dtype=mx.float32).reshape(1, 2, 3, 4)
+
+        actual = apply_rope(values, offset=5)
+        positions = mx.arange(5, 8, dtype=mx.float32)
+        inv_freq = 1.0 / (1_000_000.0 ** (mx.arange(0, 4, 2, dtype=mx.float32) / 4))
+        frequencies = positions[:, None] * inv_freq[None, :]
+        embeddings = mx.concatenate([frequencies, frequencies], axis=-1)
+        cos = mx.cos(embeddings)[None, None]
+        sin = mx.sin(embeddings)[None, None]
+        rotated = mx.concatenate([-values[..., 2:], values[..., :2]], axis=-1)
+        expected = values * cos + rotated * sin
+        mx.eval(actual, expected)
+
+        np.testing.assert_allclose(
+            np.array(actual), np.array(expected), rtol=1e-5, atol=1e-5
+        )
 
     def test_talker_and_code_predictor_transition_is_deterministic(self):
         _, components_type, _ = self._component_types()

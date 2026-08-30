@@ -2,16 +2,15 @@
 
 32-layer causal transformer with:
 - Causal conv1d stem (128 -> 1280, stride 1; 1280 -> 1280, stride 2)
-- Interleaved RoPE (theta=1M), fused via mx.fast.rope
+- Configurable fused RoPE (theta=1M; interleaved by default)
 - Sliding window attention (750)
 - SwiGLU FFN
 - Selective biases (wq/wv/wo yes, wk no; w2 only in FFN)
 - 4x downsample + adapter MLP
 
 Optimizations:
-- RoPE applied via the fused mx.fast.rope kernel (traditional=True) instead of
-  a Python interleave — matches the voxmlx path and avoids 32 layers' worth
-  of manual reshape/stack overhead per step.
+- RoPE applied via the fused mx.fast.rope kernel instead of a Python
+  implementation, avoiding 32 layers' worth of manual tensor operations.
 - Attention mask computed once per chunk and shared across all 32 layers.
 """
 
@@ -52,6 +51,7 @@ class EncoderAttention(nn.Module):
         self.head_dim = config.head_dim
         self.sliding_window = config.sliding_window
         self.rope_theta = config.rope_theta
+        self.traditional_rope = config.traditional_rope
         attn_dim = config.n_heads * config.head_dim
 
         # Selective biases: wq, wv, wo have bias; wk does NOT
@@ -78,23 +78,8 @@ class EncoderAttention(nn.Module):
         k = k.reshape(1, seq_len, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
         v = v.reshape(1, seq_len, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
 
-        # Fused RoPE (traditional=True = GPT-J style interleaved pairs).
-        q = mx.fast.rope(
-            q,
-            self.head_dim,
-            traditional=True,
-            base=self.rope_theta,
-            scale=1.0,
-            offset=rope_offset,
-        )
-        k = mx.fast.rope(
-            k,
-            self.head_dim,
-            traditional=True,
-            base=self.rope_theta,
-            scale=1.0,
-            offset=rope_offset,
-        )
+        q = self.apply_rope(q, rope_offset)
+        k = self.apply_rope(k, rope_offset)
 
         # Update KV cache if provided (for chunked encoding)
         if cache is not None:
@@ -108,6 +93,16 @@ class EncoderAttention(nn.Module):
             seq_len, self.n_heads * self.head_dim
         )
         return self.wo(attn_out)
+
+    def apply_rope(self, x, offset):
+        return mx.fast.rope(
+            x,
+            self.head_dim,
+            traditional=self.traditional_rope,
+            base=self.rope_theta,
+            scale=1.0,
+            offset=offset,
+        )
 
 
 class EncoderLayer(nn.Module):
