@@ -28,6 +28,7 @@ def _dataclass_kwargs(cls, values: Dict[str, Any]) -> Dict[str, Any]:
 @dataclass
 class RaonVoxtralEncoderConfig(EncoderConfig):
     skip_projector: bool = True
+    traditional_rope: bool = False
 
     @property
     def stacked_output_size(self) -> int:
@@ -152,6 +153,18 @@ class RaonVoxtralEncoder(nn.Module):
         self.encoder.audio_language_projection_2 = None
 
     def __call__(self, mel: mx.array) -> mx.array:
+        if mel.ndim == 2:
+            mel = mel[None]
+        if mel.ndim != 3:
+            raise ValueError(
+                "Raon audio features must have shape (batch, mel_bins, frames) "
+                "or (mel_bins, frames)."
+            )
+        if mel.shape[0] == 0:
+            raise ValueError("Raon audio feature batches cannot be empty.")
+        return mx.stack([self._encode_one(sample) for sample in mel], axis=0)
+
+    def _encode_one(self, mel: mx.array) -> mx.array:
         conv_out = self.encoder.conv_stem(mel)
         if conv_out.shape[0] <= self.config.sliding_window:
             hidden_states = conv_out

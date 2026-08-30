@@ -49,6 +49,7 @@ class EncoderConfig(BaseModelArgs):
     causal: bool = True
     use_biases: bool = True
     downsample_factor: int = 4
+    traditional_rope: bool = True
 
 
 @dataclass
