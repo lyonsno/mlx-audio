@@ -222,7 +222,12 @@ class TestRaonTextToSpeech(unittest.TestCase):
             model.speech.audio_lm_head.weight
         )
 
-        chunks = list(PocketTTSResponder(model).create_generator("hello"))
+        with patch.object(
+            raon_tts,
+            "make_first_code_sampler",
+            return_value=lambda logits: mx.array([0]),
+        ):
+            chunks = list(PocketTTSResponder(model).create_generator("hello"))
 
         self.assertEqual(len(chunks), 1)
         self.assertIsInstance(chunks[0], GenerationResult)
@@ -296,6 +301,38 @@ class TestRaonTextToSpeech(unittest.TestCase):
             sampled = [int(sampler(mx.zeros((1, 11))).item()) for _ in range(4)]
 
         self.assertEqual(sampled, [3, 7, 3, 8])
+
+    def test_first_code_sampler_disables_full_vocabulary_top_k(self):
+        captured = []
+
+        def capture_sample(logits, *, temperature, top_k, top_p):
+            captured.append((temperature, top_k, top_p))
+            return mx.array([2])
+
+        with patch.object(raon_tts, "_sample_logits", side_effect=capture_sample):
+            sampler = raon_tts.make_first_code_sampler(
+                temperature=1.2,
+                top_k=11,
+                top_p=0.8,
+                ras_enabled=False,
+                ras_window_size=50,
+                ras_repetition_threshold=0.5,
+                audio_end_code=10,
+            )
+            sampler(mx.zeros((1, 11)))
+
+        self.assertEqual(captured, [(1.2, 0, 0.8)])
+
+    def test_source_top_k_preserves_logits_tied_at_cutoff(self):
+        logits = mx.array([[4.0, 3.0, 3.0, 1.0]])
+
+        filtered = raon_tts._apply_source_top_k(logits, 2)
+        mx.eval(filtered)
+
+        np.testing.assert_array_equal(
+            np.isfinite(np.array(filtered)),
+            [[True, True, True, False]],
+        )
 
     def test_source_weight_admission_fails_loud_on_missing_family(self):
         _, model_type, _ = self._types()
