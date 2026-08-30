@@ -240,7 +240,45 @@ class TestRaonTextToSpeech(unittest.TestCase):
             state,
             audio_input_embeds=speech_embedding,
             audio_input_embeds_mask=mx.array([[True]]),
-            text_sampler=lambda _: raon.AUDIO_OUTPUT_PAD_ID,
+            text_sampler=lambda _: 7,
+            first_code_sampler=lambda _: mx.array([2], dtype=mx.int32),
+        )
+
+        self.assertEqual(
+            result.frame_tokens,
+            [
+                raon.AUDIO_INPUT_PLACEHOLDER_ID,
+                7,
+                raon.AUDIO_OUTPUT_PLACEHOLDER_ID,
+            ],
+        )
+        self.assertTrue(result.emitted_audio)
+        self.assertEqual(result.state.audio_codes.shape, (1, 2, 3))
+        self.assertEqual(result.state.thinker_cache[0].offset, 6)
+        self.assertEqual(result.state.talker_cache[0].offset, 6)
+
+    def test_listen_first_forces_two_initial_silence_predictions(self):
+        speech_config = self._config(raon.RaonSpeechConfig)
+        config = raon.RaonDuplexConfig.from_speech_config(
+            speech_config,
+            state=raon.DuplexStateConfig(
+                use_duplex_end_pad=True,
+                use_sil_token=True,
+                sequence_mode="uta",
+            ),
+        )
+        model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+        state = model.init_duplex_state(
+            mx.array([7], dtype=mx.int32),
+            speak_first=False,
+            first_code_sampler=lambda _: mx.array([1], dtype=mx.int32),
+        )
+
+        result = model.duplex_frame(
+            state,
+            audio_input_embeds=mx.full((1, 1, 8), 0.25),
+            audio_input_embeds_mask=mx.array([[True]]),
+            text_sampler=lambda _: raon.AUDIO_OUTPUT_END_PAD_ID,
             first_code_sampler=lambda _: mx.array([2], dtype=mx.int32),
         )
 
@@ -248,10 +286,34 @@ class TestRaonTextToSpeech(unittest.TestCase):
             result.frame_tokens,
             [raon.AUDIO_INPUT_PLACEHOLDER_ID, raon.AUDIO_OUTPUT_PLACEHOLDER_ID],
         )
-        self.assertTrue(result.emitted_audio)
-        self.assertEqual(result.state.audio_codes.shape, (1, 2, 3))
-        self.assertEqual(result.state.thinker_cache[0].offset, 6)
-        self.assertEqual(result.state.talker_cache[0].offset, 6)
+        self.assertEqual(result.state.machine_state.phase, raon.DuplexPhase.SIL)
+
+    def test_duplex_text_sampler_cannot_select_a_masked_token(self):
+        speech_config = self._config(raon.RaonSpeechConfig)
+        config = raon.RaonDuplexConfig.from_speech_config(
+            speech_config,
+            state=raon.DuplexStateConfig(
+                use_duplex_end_pad=True,
+                use_sil_token=True,
+                sequence_mode="uta",
+            ),
+        )
+        model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+        machine_state = raon.DuplexMachineState(
+            raon.DuplexPhase.SPEECH,
+            [
+                raon.AUDIO_INPUT_PLACEHOLDER_ID,
+                raon.AUDIO_OUTPUT_END_PAD_ID,
+                raon.AUDIO_OUTPUT_PLACEHOLDER_ID,
+            ],
+        )
+
+        with self.assertRaisesRegex(ValueError, "masked token"):
+            model._select_text_token(
+                mx.zeros((1, 2, config.thinker.vocab_size)),
+                machine_state,
+                lambda _: raon.AUDIO_OUTPUT_PAD_ID,
+            )
 
     def test_generated_codes_feed_back_and_both_caches_advance(self):
         _, model_type, _ = self._types()

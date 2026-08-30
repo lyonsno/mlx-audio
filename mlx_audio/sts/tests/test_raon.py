@@ -91,6 +91,14 @@ class TestRaonDuplexStateManager(unittest.TestCase):
 
         self.assertTrue(state.emitted_audio)
 
+    def test_state_config_rejects_unsupported_sequence_modes(self):
+        with self.assertRaisesRegex(ValueError, "sequence_mode"):
+            DuplexStateConfig(sequence_mode="not-a-raon-mode")
+
+    def test_state_config_rejects_unimplemented_no_audio_in_sil(self):
+        with self.assertRaisesRegex(ValueError, "no_audio_in_sil"):
+            DuplexStateConfig(no_audio_in_sil=True)
+
 
 class TestRaonSpeechComponents(unittest.TestCase):
     def _component_types(self):
@@ -240,6 +248,20 @@ class TestRaonSpeechComponents(unittest.TestCase):
 
         self.assertEqual(first.shape, (1, 3))
         np.testing.assert_array_equal(np.array(first), np.array(second))
+
+    def test_talker_rejects_explicit_attention_mask_with_nonempty_cache(self):
+        _, components_type, _ = self._component_types()
+        model = components_type(self._tiny_config())
+        cache = model.talker.make_cache()
+        inputs = mx.zeros((1, 1, model.config.talker.hidden_size))
+        model.talker(inputs, cache=cache)
+
+        with self.assertRaisesRegex(ValueError, "cached explicit attention masks"):
+            model.talker(
+                inputs,
+                attention_mask=mx.ones((1, 2)),
+                cache=cache,
+            )
 
     def test_sanitizer_maps_pinned_raon_source_names(self):
         _, components_type, _ = self._component_types()

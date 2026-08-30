@@ -210,6 +210,10 @@ class RaonTalker(nn.Module):
     ) -> mx.array:
         batch, seq_len, _ = inputs_embeds.shape
         offset = cache[0].offset if cache and cache[0] is not None else 0
+        if attention_mask is not None and offset:
+            raise ValueError(
+                "RaonTalker does not support cached explicit attention masks."
+            )
         if position_ids is None:
             if attention_mask is not None:
                 positions = (mx.cumsum(attention_mask, axis=-1) - 1).astype(mx.int32)

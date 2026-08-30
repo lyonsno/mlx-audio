@@ -59,6 +59,12 @@ class DuplexStateConfig:
     use_backchannel_token: bool = False
     duplex_bc_token_id: int = AUDIO_OUTPUT_BACKCHANNEL_ID
 
+    def __post_init__(self) -> None:
+        if self.sequence_mode not in (None, "tua", "uta"):
+            raise ValueError("Raon duplex sequence_mode must be 'tua', 'uta', or None.")
+        if self.no_audio_in_sil:
+            raise ValueError("Raon duplex no_audio_in_sil=true is not implemented.")
+
     @property
     def effective_sequence_mode(self) -> Literal["tua", "uta"]:
         return self.sequence_mode or "tua"
