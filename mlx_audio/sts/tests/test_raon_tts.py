@@ -7,6 +7,7 @@ import mlx.core as mx
 import numpy as np
 
 import mlx_audio.sts.models.raon as raon
+import mlx_audio.sts.models.raon.tts as raon_tts
 from mlx_audio.sts.voice_pipeline import PocketTTSResponder
 from mlx_audio.tts.models.base import GenerationResult
 from mlx_audio.utils import load_weights
@@ -233,6 +234,68 @@ class TestRaonTextToSpeech(unittest.TestCase):
         self.assertTrue(chunks[0].is_final_chunk)
         self.assertFalse(chunks[0].is_streaming_chunk)
         self.assertEqual(chunks[0].prompt["text"], "hello")
+
+    def test_public_generation_uses_source_tts_sampling_defaults(self):
+        _, model_type, _ = self._types()
+        model = model_type(self._config(), codec=_FakeCodec(8))
+        model.tokenizer = _FakeTokenizer()
+        result_type = getattr(raon_tts, "RaonTTSResult")
+        captured = {}
+
+        def capture_generation(input_ids, *, max_frames, first_code_sampler=None):
+            captured["input_ids"] = input_ids
+            captured["max_frames"] = max_frames
+            captured["sampler"] = first_code_sampler
+            return result_type(
+                audio_codes=mx.zeros((1, 0, 3), dtype=mx.int32),
+                audio=mx.zeros((1, 1, 0), dtype=mx.float32),
+                finish_reason="audio_end",
+                steps=(),
+            )
+
+        model.generate_frames = capture_generation
+        with patch.object(
+            raon_tts,
+            "make_first_code_sampler",
+            return_value=lambda logits: mx.array([1]),
+        ) as make_first_code_sampler:
+            list(model.generate("hello"))
+
+        self.assertTrue(model.supports_temperature)
+        self.assertIsNotNone(captured["sampler"])
+        make_first_code_sampler.assert_called_once_with(
+            temperature=1.2,
+            top_k=20,
+            top_p=0.8,
+            ras_enabled=True,
+            ras_window_size=50,
+            ras_repetition_threshold=0.5,
+            audio_end_code=model.config.codebook_size,
+        )
+
+    def test_first_code_sampler_rescues_source_threshold_repetition(self):
+        base_tokens = iter([3, 3, 3, 3])
+        rescue_tokens = iter([7, 8])
+
+        def controlled_sample(logits, *, temperature, top_k, top_p):
+            if (temperature, top_k, top_p) == (1.0, 0, 1.0):
+                return mx.array([next(rescue_tokens)])
+            return mx.array([next(base_tokens)])
+
+        with patch.object(raon_tts, "_sample_logits", side_effect=controlled_sample):
+            sampler = raon_tts.make_first_code_sampler(
+                temperature=1.2,
+                top_k=20,
+                top_p=0.8,
+                ras_enabled=True,
+                ras_window_size=3,
+                ras_repetition_threshold=0.5,
+                audio_end_code=10,
+            )
+
+            sampled = [int(sampler(mx.zeros((1, 11))).item()) for _ in range(4)]
+
+        self.assertEqual(sampled, [3, 7, 3, 8])
 
     def test_source_weight_admission_fails_loud_on_missing_family(self):
         _, model_type, _ = self._types()

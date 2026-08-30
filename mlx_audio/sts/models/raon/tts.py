@@ -23,6 +23,7 @@ from mlx_audio.lm.models.base import create_attention_mask
 from mlx_audio.lm.models.cache import KVCache
 from mlx_audio.lm.models.qwen3 import ModelArgs as Qwen3ModelArgs
 from mlx_audio.lm.models.qwen3 import Qwen3Model
+from mlx_audio.lm.sample_utils import apply_top_k, apply_top_p
 from mlx_audio.tts.models.base import GenerationResult
 from mlx_audio.utils import get_model_path, load_weights
 
@@ -233,6 +234,79 @@ def prepare_tts_prompt(tokenizer: Any, text: str) -> mx.array:
     return mx.array(input_ids, dtype=mx.int32)
 
 
+def _sample_logits(
+    logits: mx.array,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+) -> mx.array:
+    scores = logits.astype(mx.float32) / temperature
+    if top_k:
+        scores = apply_top_k(scores, top_k)
+    logprobs = scores - mx.logsumexp(scores, axis=-1, keepdims=True)
+    if top_p < 1:
+        logprobs = apply_top_p(logprobs, top_p)
+    return mx.random.categorical(logprobs, axis=-1)
+
+
+def make_first_code_sampler(
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    ras_enabled: bool,
+    ras_window_size: int,
+    ras_repetition_threshold: float,
+    audio_end_code: int,
+) -> Callable[[mx.array], mx.array]:
+    """Build the source TTS sampler for the first codec group."""
+    if temperature <= 0:
+        raise ValueError("Raon TTS sampling temperature must be positive.")
+    if top_k < 0:
+        raise ValueError("Raon TTS top_k must be non-negative.")
+    if not 0 < top_p <= 1:
+        raise ValueError("Raon TTS top_p must be in the interval (0, 1].")
+    if ras_window_size <= 0:
+        raise ValueError("Raon TTS RAS window size must be positive.")
+    if not 0 <= ras_repetition_threshold <= 1:
+        raise ValueError("Raon TTS RAS repetition threshold must be in [0, 1].")
+
+    effective_top_k = min(top_k, audio_end_code) if top_k else 0
+    history: list[int] = []
+
+    def sample_first_code(logits: mx.array) -> mx.array:
+        if logits.ndim != 2 or logits.shape[0] != 1:
+            raise ValueError(
+                "Raon TTS first-code sampling currently requires batch size 1."
+            )
+        sampled = _sample_logits(
+            logits,
+            temperature=temperature,
+            top_k=effective_top_k,
+            top_p=top_p,
+        )
+        sampled_token = int(sampled.item())
+        window = history[-ras_window_size:]
+        if ras_enabled and window:
+            repetition_ratio = sum(token == sampled_token for token in window) / len(
+                window
+            )
+            if repetition_ratio > ras_repetition_threshold:
+                sampled = _sample_logits(
+                    logits,
+                    temperature=1.0,
+                    top_k=0,
+                    top_p=1.0,
+                )
+                sampled_token = int(sampled.item())
+        if sampled_token != audio_end_code:
+            history.append(sampled_token)
+        return mx.array([sampled_token], dtype=mx.int32)
+
+    return sample_first_code
+
+
 class RaonTTSModel(nn.Module):
     _REQUIRED_SOURCE_FAMILIES = (
         "text_model.",
@@ -252,7 +326,7 @@ class RaonTTSModel(nn.Module):
     }
     supports_streaming = False
     supports_voice = False
-    supports_temperature = False
+    supports_temperature = True
     _SUPPORTS_AUDIO_INPUT = False
 
     def __init__(self, config: RaonTTSConfig, codec: Optional[Any] = None):
@@ -383,12 +457,32 @@ class RaonTTSModel(nn.Module):
             steps=tuple(steps),
         )
 
-    def generate_text_frames(self, text: str, *, max_frames: int) -> RaonTTSResult:
+    def generate_text_frames(
+        self,
+        text: str,
+        *,
+        max_frames: int,
+        temperature: float = 1.2,
+        top_k: int = 20,
+        top_p: float = 0.8,
+        ras_enabled: bool = True,
+        ras_window_size: int = 50,
+        ras_repetition_threshold: float = 0.5,
+    ) -> RaonTTSResult:
         if self.tokenizer is None:
             raise RuntimeError("Raon tokenizer is not loaded.")
         return self.generate_frames(
             prepare_tts_prompt(self.tokenizer, text),
             max_frames=max_frames,
+            first_code_sampler=make_first_code_sampler(
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                ras_enabled=ras_enabled,
+                ras_window_size=ras_window_size,
+                ras_repetition_threshold=ras_repetition_threshold,
+                audio_end_code=self.config.codebook_size,
+            ),
         )
 
     def _finalize_waveform(self, result: RaonTTSResult) -> mx.array:
@@ -418,6 +512,11 @@ class RaonTTSModel(nn.Module):
         text: str,
         voice: Optional[str] = None,
         temperature: Optional[float] = None,
+        top_k: int = 20,
+        top_p: float = 0.8,
+        ras_enabled: bool = True,
+        ras_window_size: int = 50,
+        ras_repetition_threshold: float = 0.5,
         stream: bool = False,
         streaming_interval: float = 2.0,
         max_frames: Optional[int] = None,
@@ -426,8 +525,6 @@ class RaonTTSModel(nn.Module):
         """Generate one source-finalized result through MLX Audio's TTS protocol."""
         if voice is not None:
             raise ValueError("Raon TTS does not yet support voice conditioning.")
-        if temperature is not None:
-            raise ValueError("Raon TTS currently supports greedy generation only.")
         if stream:
             raise ValueError(
                 "Raon TTS does not yet support incremental audio streaming."
@@ -438,8 +535,21 @@ class RaonTTSModel(nn.Module):
 
         effective_max_frames = self.max_frames if max_frames is None else max_frames
         prompt = prepare_tts_prompt(self.tokenizer, text)
+        first_code_sampler = make_first_code_sampler(
+            temperature=1.2 if temperature is None else temperature,
+            top_k=top_k,
+            top_p=top_p,
+            ras_enabled=ras_enabled,
+            ras_window_size=ras_window_size,
+            ras_repetition_threshold=ras_repetition_threshold,
+            audio_end_code=self.config.codebook_size,
+        )
         started = time.perf_counter()
-        result = self.generate_frames(prompt, max_frames=effective_max_frames)
+        result = self.generate_frames(
+            prompt,
+            max_frames=effective_max_frames,
+            first_code_sampler=first_code_sampler,
+        )
         waveform = self._finalize_waveform(result)
         mx.eval(waveform)
         elapsed = time.perf_counter() - started
