@@ -30,11 +30,19 @@ from mlx_audio.utils import get_model_path, load_weights
 from .components import RaonComponentConfig, RaonSpeechComponents
 from .duplex import (
     AUDIO_INPUT_PLACEHOLDER_ID,
+    AUDIO_OUTPUT_BACKCHANNEL_ID,
+    AUDIO_OUTPUT_END_PAD_ID,
+    AUDIO_OUTPUT_PAD_ID,
     AUDIO_OUTPUT_PLACEHOLDER_ID,
+    AUDIO_OUTPUT_SIL_ID,
     AUDIO_START_ID,
+    DuplexMachineState,
+    DuplexStateConfig,
+    DuplexStateManager,
 )
 
 AUDIO_END_ID = 151670
+IM_START_ID = 151644
 IM_END_ID = 151645
 
 
@@ -137,6 +145,52 @@ class RaonSpeechConfig(RaonTTSConfig):
         )
 
 
+@dataclass(frozen=True)
+class RaonDuplexConfig(RaonSpeechConfig):
+    state: DuplexStateConfig
+
+    @classmethod
+    def from_speech_config(
+        cls,
+        config: RaonSpeechConfig,
+        *,
+        state: DuplexStateConfig,
+    ) -> "RaonDuplexConfig":
+        return cls(
+            thinker=config.thinker,
+            components=config.components,
+            output_adaptor=config.output_adaptor,
+            num_quantizers=config.num_quantizers,
+            codebook_size=config.codebook_size,
+            input_adaptor=config.input_adaptor,
+            state=state,
+        )
+
+    @classmethod
+    def from_dict(cls, values: Dict[str, Any]) -> "RaonDuplexConfig":
+        speech = RaonSpeechConfig.from_dict(values)
+        state = DuplexStateConfig(
+            use_duplex_end_pad=bool(values.get("use_duplex_end_pad", False)),
+            use_sil_token=bool(values.get("use_sil_token", False)),
+            no_audio_in_sil=bool(values.get("no_audio_in_sil", False)),
+            sequence_mode=values.get("sequence_mode"),
+            duplex_pad_token_id=int(
+                values.get("duplex_pad_token_id", AUDIO_OUTPUT_PAD_ID)
+            ),
+            duplex_end_pad_token_id=int(
+                values.get("duplex_end_pad_token_id", AUDIO_OUTPUT_END_PAD_ID)
+            ),
+            duplex_sil_token_id=int(
+                values.get("duplex_sil_token_id", AUDIO_OUTPUT_SIL_ID)
+            ),
+            use_backchannel_token=bool(values.get("use_backchannel_token", False)),
+            duplex_bc_token_id=int(
+                values.get("duplex_bc_token_id", AUDIO_OUTPUT_BACKCHANNEL_ID)
+            ),
+        )
+        return cls.from_speech_config(speech, state=state)
+
+
 class RaonEmbeddingAdaptor(nn.Module):
     def __init__(self, config: RaonEmbeddingAdaptorConfig):
         super().__init__()
@@ -210,6 +264,23 @@ class RaonTTSResult:
     audio: mx.array
     finish_reason: Literal["audio_end", "length"]
     steps: tuple[RaonTTSStep, ...]
+
+
+@dataclass(frozen=True)
+class RaonDuplexFrameState:
+    sequences: mx.array
+    audio_codes: mx.array
+    thinker_cache: list[KVCache]
+    talker_cache: list[KVCache]
+    machine_state: DuplexMachineState
+
+
+@dataclass(frozen=True)
+class RaonDuplexFrameResult:
+    state: RaonDuplexFrameState
+    frame_tokens: list[int]
+    emitted_audio: bool
+    emitted_codes: Optional[mx.array]
 
 
 def prepare_tts_prompt(tokenizer: Any, text: str) -> mx.array:
@@ -938,3 +1009,228 @@ class RaonSpeechModel(RaonTTSModel):
     @staticmethod
     def _load_config(values: Dict[str, Any]) -> RaonSpeechConfig:
         return RaonSpeechConfig.from_dict(values)
+
+
+class RaonDuplexModel(RaonSpeechModel):
+    """One-frame composition boundary for source-compatible duplex decoding."""
+
+    def __init__(self, config: RaonDuplexConfig, codec: Optional[Any] = None):
+        super().__init__(config, codec=codec)
+        self.config = config
+        self.state_manager = DuplexStateManager(config.state)
+
+    @staticmethod
+    def _as_batch(input_ids: mx.array) -> mx.array:
+        if input_ids.ndim == 1:
+            input_ids = input_ids[None, :]
+        if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+            raise ValueError("Raon duplex decoding currently requires batch size 1.")
+        return input_ids
+
+    def _select_text_token(
+        self,
+        text_logits: mx.array,
+        machine_state: DuplexMachineState,
+        sampler: Optional[Callable[[mx.array], Any]],
+        forced_id: Optional[int] = None,
+    ) -> int:
+        if forced_id is not None:
+            return forced_id
+        if text_logits.ndim != 3 or text_logits.shape[1] < 2:
+            raise ValueError(
+                "Raon duplex text logits must include the token preceding audio output."
+            )
+        logits = text_logits[:, -2:-1, : self.config.thinker.vocab_size]
+        if self.config.state.use_duplex_end_pad:
+            logits = self.state_manager.apply_logit_mask(
+                logits,
+                machine_state,
+                self.config.thinker.vocab_size,
+            )
+        selected = (
+            mx.argmax(logits[:, -1], axis=-1)
+            if sampler is None
+            else sampler(logits[:, -1])
+        )
+        if isinstance(selected, mx.array):
+            if selected.size != 1:
+                raise ValueError("Raon duplex text sampler must return one token.")
+            return int(selected.item())
+        return int(selected)
+
+    def _generate_duplex_codes(
+        self,
+        talker_hidden: mx.array,
+        sampler: Optional[Callable[[mx.array], Any]],
+    ) -> mx.array:
+        def suppress_audio_end(logits: mx.array) -> Any:
+            masked = logits.at[:, self.config.codebook_size].add(-mx.inf)
+            return mx.argmax(masked, axis=-1) if sampler is None else sampler(masked)
+
+        codes = self.speech.generate_audio_codes_from_talker_hidden(
+            talker_hidden[:, -1:],
+            first_code_sampler=suppress_audio_end,
+        )
+        ended = codes[:, 0] == self.config.codebook_size
+        return mx.where(ended[:, None], mx.zeros_like(codes), codes)
+
+    def _transition(
+        self,
+        *,
+        state: RaonDuplexFrameState,
+        talker_hidden: mx.array,
+        text_logits: mx.array,
+        text_sampler: Optional[Callable[[mx.array], Any]],
+        first_code_sampler: Optional[Callable[[mx.array], Any]],
+        forced_id: Optional[int] = None,
+    ) -> RaonDuplexFrameResult:
+        predicted_id = self._select_text_token(
+            text_logits,
+            state.machine_state,
+            text_sampler,
+            forced_id=forced_id,
+        )
+        machine_state, frame_tokens, emitted_audio = self.state_manager.transition(
+            state.machine_state,
+            predicted_id,
+        )
+        emitted_codes = (
+            self._generate_duplex_codes(talker_hidden, first_code_sampler)
+            if emitted_audio
+            else None
+        )
+        audio_codes = state.audio_codes
+        if emitted_codes is not None:
+            audio_codes = mx.concatenate(
+                [audio_codes, emitted_codes[:, None, :]], axis=1
+            )
+        frame = mx.array([frame_tokens], dtype=mx.int32)
+        next_state = RaonDuplexFrameState(
+            sequences=mx.concatenate([state.sequences, frame], axis=1),
+            audio_codes=audio_codes,
+            thinker_cache=state.thinker_cache,
+            talker_cache=state.talker_cache,
+            machine_state=machine_state,
+        )
+        return RaonDuplexFrameResult(
+            state=next_state,
+            frame_tokens=frame_tokens,
+            emitted_audio=emitted_audio,
+            emitted_codes=emitted_codes,
+        )
+
+    def init_duplex_state(
+        self,
+        system_tokens: mx.array,
+        *,
+        speak_first: bool = False,
+        text_sampler: Optional[Callable[[mx.array], Any]] = None,
+        first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+    ) -> RaonDuplexFrameState:
+        system_tokens = self._as_batch(system_tokens)
+        initial_tokens = mx.concatenate(
+            [
+                system_tokens,
+                mx.array([[IM_START_ID, AUDIO_START_ID]], dtype=mx.int32),
+            ],
+            axis=1,
+        )
+        thinker_cache = self.thinker.make_cache()
+        talker_cache = self.speech.talker.make_cache()
+        talker_hidden, text_logits = self._forward(
+            initial_tokens,
+            thinker_cache,
+            talker_cache,
+        )
+        empty_codes = mx.zeros(
+            (1, 0, self.config.components.code_predictor.num_code_groups),
+            dtype=mx.int32,
+        )
+        state = RaonDuplexFrameState(
+            sequences=initial_tokens,
+            audio_codes=empty_codes,
+            thinker_cache=thinker_cache,
+            talker_cache=talker_cache,
+            machine_state=self.state_manager.initial_state(speak_first=speak_first),
+        )
+        result = self._transition(
+            state=state,
+            talker_hidden=talker_hidden,
+            text_logits=text_logits,
+            text_sampler=text_sampler,
+            first_code_sampler=first_code_sampler,
+            forced_id=self.state_manager.initial_forced_prediction_id(speak_first),
+        )
+        return result.state
+
+    def _prepare_duplex_embeddings(
+        self,
+        input_ids: mx.array,
+        audio_input_embeds: mx.array,
+        audio_input_embeds_mask: mx.array,
+        previous_audio_codes: Optional[mx.array],
+    ) -> mx.array:
+        inputs = self.prepare_speech_embeddings(
+            input_ids,
+            audio_input_embeds,
+            audio_input_embeds_mask,
+        )
+        if previous_audio_codes is None:
+            return inputs
+        output_mask = input_ids == AUDIO_OUTPUT_PLACEHOLDER_ID
+        output_count = int(mx.sum(output_mask).item())
+        if output_count != 1:
+            raise ValueError(
+                "Raon duplex feedback requires exactly one audio output placeholder."
+            )
+        feedback = self.feedback_embedding(previous_audio_codes)[:, 0]
+        positions = mx.where(
+            output_mask.reshape(-1),
+            mx.arange(input_ids.size),
+            input_ids.size,
+        )
+        position = mx.sort(positions)[0]
+        flat = inputs.reshape(-1, inputs.shape[-1])
+        current = flat[position]
+        flat = flat.at[position].add(feedback[0] - current)
+        return flat.reshape(inputs.shape)
+
+    def duplex_frame(
+        self,
+        state: RaonDuplexFrameState,
+        *,
+        audio_input_embeds: mx.array,
+        audio_input_embeds_mask: mx.array,
+        text_sampler: Optional[Callable[[mx.array], Any]] = None,
+        first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+    ) -> RaonDuplexFrameResult:
+        frame_tokens = state.machine_state.last_frame_tokens
+        input_ids = mx.array([frame_tokens], dtype=mx.int32)
+        if state.sequences.shape[1] < len(frame_tokens) or not mx.array_equal(
+            state.sequences[:, -len(frame_tokens) :], input_ids
+        ):
+            raise ValueError("Raon duplex state tokens do not match the sequence tail.")
+        previous = state.audio_codes[:, -1:] if state.audio_codes.shape[1] else None
+        inputs = self._prepare_duplex_embeddings(
+            input_ids,
+            audio_input_embeds,
+            audio_input_embeds_mask,
+            previous,
+        )
+        talker_hidden, text_logits = self._forward(
+            input_ids,
+            state.thinker_cache,
+            state.talker_cache,
+            input_embeddings=inputs,
+        )
+        return self._transition(
+            state=state,
+            talker_hidden=talker_hidden,
+            text_logits=text_logits,
+            text_sampler=text_sampler,
+            first_code_sampler=first_code_sampler,
+        )
+
+    @staticmethod
+    def _load_config(values: Dict[str, Any]) -> RaonDuplexConfig:
+        return RaonDuplexConfig.from_dict(values)
