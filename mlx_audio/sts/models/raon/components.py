@@ -1,5 +1,5 @@
 from dataclasses import dataclass, fields
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -364,8 +364,27 @@ class RaonSpeechComponents(nn.Module):
             position_ids=position_ids,
             attention_mask=attention_mask,
         )
+        return self.generate_audio_codes_from_talker_hidden(talker_hidden)
+
+    def generate_audio_codes_from_talker_hidden(
+        self,
+        talker_hidden: mx.array,
+        first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+    ) -> mx.array:
         first_logits = self.audio_lm_head(talker_hidden[:, -1])
-        first_code = mx.argmax(first_logits, axis=-1)
+        if first_code_sampler is None:
+            first_code = mx.argmax(first_logits, axis=-1)
+        else:
+            sampled = first_code_sampler(first_logits)
+            first_code = (
+                sampled
+                if isinstance(sampled, mx.array)
+                else mx.full((talker_hidden.shape[0],), int(sampled), mx.int32)
+            )
+            if first_code.ndim == 0:
+                first_code = mx.broadcast_to(first_code, (talker_hidden.shape[0],))
+            elif first_code.ndim == 2 and first_code.shape[-1] == 1:
+                first_code = first_code[:, 0]
         ended = first_code == self.config.codebook_size
         safe_first = mx.minimum(first_code, self.config.codebook_size - 1)
         code_inputs = mx.concatenate(
