@@ -633,13 +633,18 @@ class RaonTTSModel(nn.Module):
         *,
         revision: Optional[str] = None,
         weight_files: Optional[Sequence[Union[str, Path, BinaryIO]]] = None,
+        weight_format: Optional[str] = None,
     ) -> "RaonTTSModel":
         model_path = get_model_path(path_or_repo, revision=revision)
         with open(Path(model_path) / "config.json", encoding="utf-8") as handle:
             config = cls._load_config(json.load(handle))
         model = cls(config)
         model.load_source_weights(
-            load_weights(Path(model_path), weight_files=weight_files)
+            load_weights(
+                Path(model_path),
+                weight_files=weight_files,
+                weight_format=weight_format,
+            )
         )
         mx.eval(model.parameters())
 

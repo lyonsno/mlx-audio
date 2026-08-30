@@ -182,6 +182,7 @@ def load_weights(
     model_path: Path,
     *,
     weight_files: Optional[Sequence[Union[str, Path, BinaryIO]]] = None,
+    weight_format: Optional[str] = None,
 ) -> dict:
     """Load model weights from safetensors or npz files.
 
@@ -189,6 +190,8 @@ def load_weights(
         model_path: Path to the model directory
         weight_files: Optional explicit weight paths or open binary files to load
             instead of discovering files from ``model_path``.
+        weight_format: Optional format passed to ``mx.load``. Use this when open
+            binary sources have content-addressed names without file extensions.
 
     Returns:
         dict: Dictionary of weight name -> array
@@ -217,7 +220,7 @@ def load_weights(
     for wf in selected_files:
         if hasattr(wf, "seek"):
             wf.seek(0)
-        weights.update(mx.load(wf))
+        weights.update(mx.load(wf, format=weight_format))
 
     return weights
 

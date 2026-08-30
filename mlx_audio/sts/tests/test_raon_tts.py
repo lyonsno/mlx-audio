@@ -272,6 +272,26 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 [1.0],
             )
 
+            content_addressed = model_path / "bffeaf083a59f73b"
+            content_addressed_source = model_path / "content-addressed.safetensors"
+            mx.save_safetensors(
+                str(content_addressed_source),
+                {"weight": mx.array([3.0])},
+            )
+            content_addressed_source.replace(content_addressed)
+            with content_addressed.open("rb") as authenticated:
+                suffixless_weights = load_weights(
+                    model_path,
+                    weight_files=[authenticated],
+                    weight_format="safetensors",
+                )
+                mx.eval(suffixless_weights["weight"])
+
+            np.testing.assert_array_equal(
+                np.array(suffixless_weights["weight"]),
+                [3.0],
+            )
+
     def test_from_pretrained_forwards_explicit_weight_files(self):
         _, model_type, _ = self._types()
         admitted = Path("/authenticated/model-00001-of-00001.safetensors")
@@ -290,9 +310,14 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 model_type.from_pretrained(
                     str(model_path),
                     weight_files=[admitted],
+                    weight_format="safetensors",
                 )
 
-        load_selected.assert_called_once_with(model_path, weight_files=[admitted])
+        load_selected.assert_called_once_with(
+            model_path,
+            weight_files=[admitted],
+            weight_format="safetensors",
+        )
         load_source.assert_called_once_with({})
 
     def test_source_classification_rejects_unknown_root_and_supported_family(self):
