@@ -570,10 +570,15 @@ class CodePredictorAttention(nn.Module):
         if cache is not None:
             k, v = cache.update_and_fetch(k, v)
 
-        # Use fast scaled dot product attention with GQA support
-        output = mx.fast.scaled_dot_product_attention(
-            q, k, v, scale=self.scale, mask=mask
-        )
+        if self.num_kv_groups > 1:
+            k = mx.repeat(k, self.num_kv_groups, axis=1)
+            v = mx.repeat(v, self.num_kv_groups, axis=1)
+
+        scores = (q @ mx.swapaxes(k, -1, -2)) * self.scale
+        if mask is not None:
+            scores = scores + mask
+        weights = mx.softmax(scores.astype(mx.float32), axis=-1).astype(q.dtype)
+        output = weights @ v
 
         output = mx.transpose(output, (0, 2, 1, 3))
         output = output.reshape(batch, seq_len, -1)
