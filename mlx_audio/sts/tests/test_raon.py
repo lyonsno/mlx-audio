@@ -302,40 +302,66 @@ class TestRaonSpeechComponents(unittest.TestCase):
         )
         self.assertEqual(logits_dtypes, [mx.bfloat16, mx.bfloat16])
 
-    def test_code_predictor_attention_uses_source_eager_path(self):
+    def test_code_predictor_attention_uses_fused_checkpoint_dtype_route(self):
         _, components_type, _ = self._component_types()
         model = components_type(self._tiny_config())
         model.code_predictor.set_dtype(mx.bfloat16)
         core = model.code_predictor.model
-        attention = core.layers[0].self_attn
-        inputs = mx.arange(16, dtype=mx.bfloat16).reshape(1, 2, 8) / 16
-        positions = mx.array([[0, 1]])
-        position_embeddings = core.rotary_emb(inputs, positions)
-        mask = nn.MultiHeadAttention.create_additive_causal_mask(2).astype(inputs.dtype)
+        cache = core.make_cache()
+        calls = []
+        fused_attention = mx.fast.scaled_dot_product_attention
 
-        with (
-            mock.patch(
-                "mlx_audio.tts.models.qwen3_tts.talker.mx.fast.scaled_dot_product_attention",
-                side_effect=AssertionError(
-                    "fused SDPA must not serve source-eager code predictor attention"
-                ),
-            ),
-            mock.patch(
-                "mlx_audio.tts.models.qwen3_tts.talker.mx.softmax",
-                wraps=mx.softmax,
-            ) as softmax,
-        ):
-            output = attention(
-                inputs,
-                position_embeddings,
-                mask=mask,
-                cache=core.make_cache()[0],
+        def recording_attention(q, k, v, *, scale, mask):
+            calls.append(
+                {
+                    "shapes": (q.shape, k.shape, v.shape),
+                    "dtypes": (q.dtype, k.dtype, v.dtype),
+                    "scale": scale,
+                    "mask_shape": None if mask is None else mask.shape,
+                    "mask_dtype": None if mask is None else mask.dtype,
+                }
             )
-        mx.eval(output)
+            return fused_attention(q, k, v, scale=scale, mask=mask)
 
-        self.assertEqual(output.shape, inputs.shape)
-        self.assertEqual(output.dtype, mx.bfloat16)
-        self.assertEqual(softmax.call_args.args[0].dtype, mx.float32)
+        with mock.patch(
+            "mlx_audio.tts.models.qwen3_tts.talker.mx.fast.scaled_dot_product_attention",
+            side_effect=recording_attention,
+        ):
+            prefill = core(
+                mx.arange(16, dtype=mx.bfloat16).reshape(1, 2, 8) / 16,
+                cache=cache,
+            )
+            recurrence = core(
+                mx.arange(8, dtype=mx.bfloat16).reshape(1, 1, 8) / 16,
+                cache=cache,
+            )
+        mx.eval(prefill, recurrence)
+
+        self.assertEqual(prefill.shape, (1, 2, 8))
+        self.assertEqual(recurrence.shape, (1, 1, 8))
+        self.assertEqual(prefill.dtype, mx.bfloat16)
+        self.assertEqual(recurrence.dtype, mx.bfloat16)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            calls[0],
+            {
+                "shapes": ((1, 2, 2, 4), (1, 1, 2, 4), (1, 1, 2, 4)),
+                "dtypes": (mx.bfloat16, mx.bfloat16, mx.bfloat16),
+                "scale": 0.5,
+                "mask_shape": (2, 2),
+                "mask_dtype": mx.bfloat16,
+            },
+        )
+        self.assertEqual(
+            calls[1],
+            {
+                "shapes": ((1, 2, 1, 4), (1, 1, 3, 4), (1, 1, 3, 4)),
+                "dtypes": (mx.bfloat16, mx.bfloat16, mx.bfloat16),
+                "scale": 0.5,
+                "mask_shape": None,
+                "mask_dtype": None,
+            },
+        )
 
     def test_component_loading_preserves_checkpoint_dtype_through_prediction(self):
         _, components_type, _ = self._component_types()
