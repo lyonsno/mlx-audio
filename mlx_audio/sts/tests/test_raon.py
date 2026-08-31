@@ -252,7 +252,7 @@ class TestRaonSpeechComponents(unittest.TestCase):
         self.assertEqual(first.shape, (1, 3))
         np.testing.assert_array_equal(np.array(first), np.array(second))
 
-    def test_code_predictor_preserves_fp32_hidden_cache_and_logits(self):
+    def test_code_predictor_preserves_checkpoint_hidden_cache_and_logits(self):
         class RecordingCore(nn.Module):
             def __init__(self, inner):
                 super().__init__()
@@ -294,13 +294,48 @@ class TestRaonSpeechComponents(unittest.TestCase):
             codes = model.code_predictor.predict_codes(inputs)
         mx.eval(codes)
 
-        self.assertEqual(recording.input_dtypes, [mx.float32, mx.float32])
-        self.assertEqual(recording.output_dtypes, [mx.float32, mx.float32])
+        self.assertEqual(recording.input_dtypes, [mx.bfloat16, mx.bfloat16])
+        self.assertEqual(recording.output_dtypes, [mx.bfloat16, mx.bfloat16])
         self.assertEqual(
             recording.cache_dtypes,
-            [[(mx.float32, mx.float32)], [(mx.float32, mx.float32)]],
+            [[(mx.bfloat16, mx.bfloat16)], [(mx.bfloat16, mx.bfloat16)]],
         )
-        self.assertEqual(logits_dtypes, [mx.float32, mx.float32])
+        self.assertEqual(logits_dtypes, [mx.bfloat16, mx.bfloat16])
+
+    def test_code_predictor_attention_uses_source_eager_path(self):
+        _, components_type, _ = self._component_types()
+        model = components_type(self._tiny_config())
+        model.code_predictor.set_dtype(mx.bfloat16)
+        core = model.code_predictor.model
+        attention = core.layers[0].self_attn
+        inputs = mx.arange(16, dtype=mx.bfloat16).reshape(1, 2, 8) / 16
+        positions = mx.array([[0, 1]])
+        position_embeddings = core.rotary_emb(inputs, positions)
+        mask = nn.MultiHeadAttention.create_additive_causal_mask(2).astype(inputs.dtype)
+
+        with (
+            mock.patch(
+                "mlx_audio.tts.models.qwen3_tts.talker.mx.fast.scaled_dot_product_attention",
+                side_effect=AssertionError(
+                    "fused SDPA must not serve source-eager code predictor attention"
+                ),
+            ),
+            mock.patch(
+                "mlx_audio.tts.models.qwen3_tts.talker.mx.softmax",
+                wraps=mx.softmax,
+            ) as softmax,
+        ):
+            output = attention(
+                inputs,
+                position_embeddings,
+                mask=mask,
+                cache=core.make_cache()[0],
+            )
+        mx.eval(output)
+
+        self.assertEqual(output.shape, inputs.shape)
+        self.assertEqual(output.dtype, mx.bfloat16)
+        self.assertEqual(softmax.call_args.args[0].dtype, mx.float32)
 
     def test_component_loading_preserves_checkpoint_dtype_through_prediction(self):
         _, components_type, _ = self._component_types()
