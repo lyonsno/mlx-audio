@@ -1281,6 +1281,45 @@ class RaonDuplexModel(RaonSpeechModel):
             ),
         )
 
+    def create_duplex_session(
+        self,
+        *,
+        system_prompt: str = "You are engaging in real-time conversation.",
+        system_tokens: Optional[mx.array] = None,
+        speak_first: bool = False,
+        text_sampler: Optional[Callable[[mx.array], Any]] = None,
+        first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+        audio_encoder: Optional[Any] = None,
+        audio_decoder: Optional[Any] = None,
+        silence_codes: Optional[mx.array] = None,
+    ) -> Any:
+        """Create one stateful raw-audio-to-PCM duplex session."""
+        from .streaming import RaonDuplexSession, prepare_duplex_prompt
+
+        if system_tokens is None:
+            if self.tokenizer is None:
+                raise RuntimeError("Raon tokenizer is not loaded.")
+            system_tokens = prepare_duplex_prompt(self.tokenizer, system_prompt)
+        return RaonDuplexSession(
+            self,
+            system_tokens,
+            audio_encoder=audio_encoder,
+            audio_decoder=audio_decoder,
+            silence_codes=silence_codes,
+            speak_first=speak_first,
+            text_sampler=text_sampler,
+            first_code_sampler=first_code_sampler,
+        )
+
+    def generate_duplex(
+        self,
+        audio_input: Any,
+        **session_kwargs: Any,
+    ) -> Iterator[Any]:
+        """Yield one assistant PCM result for each complete user-audio frame."""
+        session = RaonDuplexModel.create_duplex_session(self, **session_kwargs)
+        yield from session.process(audio_input)
+
     @staticmethod
     def _load_config(values: Dict[str, Any]) -> RaonDuplexConfig:
         return RaonDuplexConfig.from_dict(values)
