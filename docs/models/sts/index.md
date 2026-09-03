@@ -13,6 +13,7 @@ MLX Audio provides speech-to-speech models for audio source separation, speech e
 | [**Liquid2.5-Audio**](#liquid25-audio) | LiquidAI | Speech-to-Speech, TTS, ASR | [mlx-community/LFM2.5-Audio-1.5B-4bit](https://huggingface.co/mlx-community/LFM2.5-Audio-1.5B-4bit) |
 | [**Ming-3.0 Audio Tiny**](ming3-tiny.md) | inclusionAI | Audio understanding, ASR, reasoning and spoken dialogue | [BF16](https://huggingface.co/mlx-community/Ming-3.0-audio-tiny-bf16), [8-bit](https://huggingface.co/mlx-community/Ming-3.0-audio-tiny-8bit), [4-bit](https://huggingface.co/mlx-community/Ming-3.0-audio-tiny-4bit) |
 | [**MiMo-Audio**](mimo-audio.md) | Xiaomi | Offline TTS, ASR, voice dialogue, Base few-shot tasks | [Instruct](https://huggingface.co/XiaomiMiMo/MiMo-Audio-7B-Instruct), [Base](https://huggingface.co/XiaomiMiMo/MiMo-Audio-7B-Base) |
+| [**Raon Speech**](#raon-speech) | KRAFTON | TTS, speech-input prefill, duplex frame decoding | [KRAFTON/Raon-Speech-9B](https://huggingface.co/KRAFTON/Raon-Speech-9B) |
 | [**Moshi**](#moshi) | Kyutai Labs | Full-duplex voice conversation | [kyutai/moshiko-mlx-q4](https://huggingface.co/kyutai/moshiko-mlx-q4) |
 | [**MossFormer2 SE**](#mossformer2-se) | Alibaba | Speech enhancement / noise removal | [starkdmi/MossFormer2_SE_48K_MLX](https://huggingface.co/starkdmi/MossFormer2_SE_48K_MLX) |
 | [**DeepFilterNet**](#deepfilternet) | -- | Speech enhancement / noise suppression | [mlx-community/DeepFilterNet-mlx](https://huggingface.co/mlx-community/DeepFilterNet-mlx) |
@@ -339,6 +340,29 @@ config = GenerationConfig(
 Every knob defaults to `None`, i.e. greedy decoding, matching `liquid-audio`. The
 upstream recipes are greedy text throughout, with `audio_temperature=1.0`/`audio_top_k=4`
 for interleaved chat and `audio_temperature=0.8`/`audio_top_k=64` for TTS.
+
+---
+
+## Raon Speech
+
+[Raon Speech](https://huggingface.co/KRAFTON/Raon-Speech-9B) is KRAFTON's 9B-parameter English and Korean speech language model. The MLX implementation provides text-to-speech generation from the original checkpoint, speech-conditioned thinker prefill, and the state and frame boundaries needed to build a duplex loop.
+
+The high-level generation path currently supports non-streaming, single-prompt TTS without speaker conditioning:
+
+```python
+from mlx_audio.audio_io import write as audio_write
+from mlx_audio.sts.models.raon import RaonTTSModel
+
+model = RaonTTSModel.from_pretrained("KRAFTON/Raon-Speech-9B")
+result = next(model.generate("Hello, how are you?"))
+
+audio_write("output.wav", result.audio, result.sample_rate)
+```
+
+`generate()` accepts `temperature`, `top_k`, `top_p`, repetition-aware sampling controls, and an optional `max_frames` ceiling. It returns one final `GenerationResult`; `stream=True` and `voice` conditioning are rejected explicitly. `RaonSpeechModel` and `RaonDuplexModel` expose lower-level speech-input and per-frame duplex composition APIs, but this integration does not yet provide a complete live microphone-to-speaker conversation loop.
+
+!!! warning "Checkpoint license"
+    The KRAFTON checkpoint is distributed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Review its non-commercial-use terms before deploying or redistributing the weights.
 
 ---
 
