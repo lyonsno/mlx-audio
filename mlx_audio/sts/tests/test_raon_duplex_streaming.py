@@ -203,6 +203,68 @@ class TestRaonDuplexStreaming(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(model.system_tokens.tolist(), [7])
 
+    def test_model_entrypoint_uses_source_sampling_defaults(self):
+        model = _StubDuplexModel()
+
+        raon.RaonDuplexModel.create_duplex_session(
+            model,
+            system_tokens=mx.array([7], dtype=mx.int32),
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        self.assertIsNotNone(model.init_kwargs["text_sampler"])
+        self.assertIsNotNone(model.init_kwargs["first_code_sampler"])
+
+    def test_model_entrypoint_defaults_to_empty_source_prompt(self):
+        class Tokenizer:
+            def apply_chat_template(self, *args, **kwargs):
+                return "rendered-system"
+
+            def encode(self, *args, **kwargs):
+                return [11, 12]
+
+        model = _StubDuplexModel()
+        model.tokenizer = Tokenizer()
+
+        raon.RaonDuplexModel.create_duplex_session(
+            model,
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        self.assertEqual(model.system_tokens.tolist(), [])
+
+    def test_model_entrypoint_allows_explicit_greedy_decoding(self):
+        model = _StubDuplexModel()
+
+        raon.RaonDuplexModel.create_duplex_session(
+            model,
+            system_tokens=mx.array([7], dtype=mx.int32),
+            do_sample=False,
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        self.assertIsNone(model.init_kwargs["text_sampler"])
+        self.assertIsNone(model.init_kwargs["first_code_sampler"])
+
+    def test_model_entrypoint_rejects_invalid_sampling_controls(self):
+        model = _StubDuplexModel()
+
+        with self.assertRaisesRegex(ValueError, "temperature must be positive"):
+            raon.RaonDuplexModel.create_duplex_session(
+                model,
+                system_tokens=mx.array([7], dtype=mx.int32),
+                temperature=0,
+                audio_encoder=_StubAudioEncoder(hidden_size=8),
+                audio_decoder=_StubAudioDecoder(),
+                silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+            )
+
     def test_session_rejects_wrong_frame_size(self):
         session = raon.RaonDuplexSession(
             _StubDuplexModel(),

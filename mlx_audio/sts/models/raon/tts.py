@@ -329,6 +329,32 @@ def _sample_logits(
     return mx.random.categorical(logprobs, axis=-1)
 
 
+def _make_duplex_sampler(
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+) -> Callable[[mx.array], mx.array]:
+    if temperature <= 0:
+        raise ValueError("Raon duplex sampling temperature must be positive.")
+    if top_k < 0:
+        raise ValueError("Raon duplex top_k must be non-negative.")
+    if not 0 < top_p <= 1:
+        raise ValueError("Raon duplex top_p must be in the interval (0, 1].")
+
+    def sample(logits: mx.array) -> mx.array:
+        if logits.ndim != 2 or logits.shape[0] != 1:
+            raise ValueError("Raon duplex sampling currently requires batch size 1.")
+        return _sample_logits(
+            logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+        )
+
+    return sample
+
+
 def make_first_code_sampler(
     *,
     temperature: float,
@@ -1284,9 +1310,13 @@ class RaonDuplexModel(RaonSpeechModel):
     def create_duplex_session(
         self,
         *,
-        system_prompt: str = "You are engaging in real-time conversation.",
+        system_prompt: str = "",
         system_tokens: Optional[mx.array] = None,
         speak_first: bool = False,
+        do_sample: bool = True,
+        temperature: float = 1.0,
+        top_k: int = 20,
+        top_p: float = 0.8,
         text_sampler: Optional[Callable[[mx.array], Any]] = None,
         first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
         audio_encoder: Optional[Any] = None,
@@ -1297,9 +1327,27 @@ class RaonDuplexModel(RaonSpeechModel):
         from .streaming import RaonDuplexSession, prepare_duplex_prompt
 
         if system_tokens is None:
-            if self.tokenizer is None:
-                raise RuntimeError("Raon tokenizer is not loaded.")
-            system_tokens = prepare_duplex_prompt(self.tokenizer, system_prompt)
+            if system_prompt:
+                if self.tokenizer is None:
+                    raise RuntimeError("Raon tokenizer is not loaded.")
+                system_tokens = prepare_duplex_prompt(self.tokenizer, system_prompt)
+            else:
+                system_tokens = mx.zeros((0,), dtype=mx.int32)
+        if do_sample:
+            if text_sampler is None:
+                text_sampler = _make_duplex_sampler(
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
+            if first_code_sampler is None:
+                first_code_sampler = _make_duplex_sampler(
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
+        elif text_sampler is not None or first_code_sampler is not None:
+            raise ValueError("Raon duplex custom samplers require do_sample=True.")
         return RaonDuplexSession(
             self,
             system_tokens,
