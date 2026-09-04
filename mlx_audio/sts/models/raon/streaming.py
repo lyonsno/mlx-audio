@@ -22,6 +22,22 @@ INPUT_SAMPLES_PER_FRAME = int(INPUT_SAMPLE_RATE / FRAME_RATE)
 ENCODER_SAMPLES_PER_FRAME = int(ENCODER_SAMPLE_RATE / FRAME_RATE)
 
 
+def _mono_audio_frame(audio_frame: Any, samples_per_frame: int) -> np.ndarray:
+    audio = np.asarray(audio_frame, dtype=np.float32)
+    if audio.shape == (samples_per_frame,):
+        frame = audio
+    elif audio.shape == (1, samples_per_frame):
+        frame = audio[0]
+    else:
+        raise ValueError(
+            "Raon duplex audio must be one mono frame containing exactly "
+            f"{samples_per_frame} samples, got shape={audio.shape}."
+        )
+    if not np.isfinite(frame).all():
+        raise ValueError("Raon duplex audio frames must contain finite samples.")
+    return frame
+
+
 def prepare_duplex_prompt(tokenizer: Any, system_prompt: str) -> mx.array:
     """Render one source-compatible system prompt for duplex decoding."""
     rendered = tokenizer.apply_chat_template(
@@ -118,14 +134,7 @@ class RaonStreamingAudioEncoder:
         self._encoded_buffer: Optional[mx.array] = None
 
     def step(self, audio_frame: Any) -> tuple[mx.array, mx.array]:
-        audio = np.asarray(audio_frame, dtype=np.float32).reshape(-1)
-        if audio.size != self.samples_per_frame:
-            raise ValueError(
-                "Raon duplex audio frames must contain exactly "
-                f"{self.samples_per_frame} samples, got {audio.size}."
-            )
-        if not np.isfinite(audio).all():
-            raise ValueError("Raon duplex audio frames must contain finite samples.")
+        audio = _mono_audio_frame(audio_frame, self.samples_per_frame)
 
         encoder_audio = np.asarray(
             resample_audio(
@@ -281,15 +290,14 @@ class RaonDuplexSession:
                 "Raon duplex Mimi decode must return exactly "
                 f"{self.samples_per_frame} samples, got {decoded.shape[-1]}."
             )
+        decoded = decoded.astype(mx.float32)
+        mx.eval(decoded)
+        if not bool(mx.all(mx.isfinite(decoded)).item()):
+            raise ValueError("Raon duplex Mimi decode must return finite PCM samples.")
         return decoded[0, 0]
 
     def step(self, audio_frame: Any) -> RaonDuplexAudioFrameResult:
-        audio = np.asarray(audio_frame, dtype=np.float32).reshape(-1)
-        if audio.size != self.samples_per_frame:
-            raise ValueError(
-                "Raon duplex audio frames must contain exactly "
-                f"{self.samples_per_frame} samples, got {audio.size}."
-            )
+        audio = _mono_audio_frame(audio_frame, self.samples_per_frame)
         embeddings, mask = self.audio_encoder.step(audio)
         frame = self.model.duplex_frame(
             self.state,
@@ -330,6 +338,11 @@ class RaonDuplexSession:
             audio = audio[0]
         if audio.ndim != 1:
             raise ValueError("Raon fixed duplex input must be mono audio.")
+        if audio.size < self.samples_per_frame:
+            raise ValueError(
+                "Raon fixed duplex input must contain at least "
+                f"{self.samples_per_frame} samples."
+            )
         complete = (audio.size // self.samples_per_frame) * self.samples_per_frame
         for start in range(0, complete, self.samples_per_frame):
             yield self.step(audio[start : start + self.samples_per_frame])

@@ -25,13 +25,15 @@ class _StubAudioEncoder:
 
 
 class _StubAudioDecoder:
-    def __init__(self):
+    def __init__(self, *, dtype=mx.float32, value=None):
         self.codes = []
+        self.dtype = dtype
+        self.value = value
 
     def decode_frame(self, codes):
         self.codes.append(np.asarray(codes).copy())
-        value = float(np.asarray(codes).sum())
-        return mx.full((1, 1, 1920), value, dtype=mx.float32)
+        value = float(np.asarray(codes).sum()) if self.value is None else self.value
+        return mx.full((1, 1, 1920), value, dtype=self.dtype)
 
 
 class _StubDuplexModel:
@@ -292,6 +294,54 @@ class TestRaonDuplexStreaming(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "exactly 1920"):
             session.step(np.zeros(1919, dtype=np.float32))
+
+    def test_session_rejects_non_finite_decoder_output(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            raon.RaonDuplexSession(
+                _StubDuplexModel(),
+                mx.array([7], dtype=mx.int32),
+                audio_encoder=_StubAudioEncoder(hidden_size=8),
+                audio_decoder=_StubAudioDecoder(value=float("nan")),
+                silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+            )
+
+    def test_session_normalizes_decoder_output_to_float32(self):
+        session = raon.RaonDuplexSession(
+            _StubDuplexModel(),
+            mx.array([7], dtype=mx.int32),
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(dtype=mx.float16),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        result = session.step(np.zeros(1920, dtype=np.float32))
+        mx.eval(result.audio)
+
+        self.assertEqual(result.audio.dtype, mx.float32)
+
+    def test_session_rejects_multichannel_shape_with_mono_sample_count(self):
+        session = raon.RaonDuplexSession(
+            _StubDuplexModel(),
+            mx.array([7], dtype=mx.int32),
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        with self.assertRaisesRegex(ValueError, "mono frame"):
+            session.step(np.zeros((2, 960), dtype=np.float32))
+
+    def test_fixed_input_rejects_wholly_incomplete_frame(self):
+        session = raon.RaonDuplexSession(
+            _StubDuplexModel(),
+            mx.array([7], dtype=mx.int32),
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least 1920"):
+            list(session.process(np.zeros(1919, dtype=np.float32)))
 
 
 if __name__ == "__main__":
