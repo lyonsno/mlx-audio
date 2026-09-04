@@ -55,7 +55,14 @@ class _StubDuplexModel:
             },
         )()
         self.frame_calls = []
-        self.initial_state = object()
+        self.initial_state = type(
+            "InitialState",
+            (),
+            {
+                "machine_state": type("MachineState", (), {"emitted_audio": False})(),
+                "audio_codes": mx.zeros((1, 0, 3), dtype=mx.int32),
+            },
+        )()
         self.tokenizer = None
 
     def init_duplex_state(self, system_tokens, **kwargs):
@@ -142,7 +149,7 @@ class TestRaonDuplexStreaming(unittest.TestCase):
         self.assertEqual(second_mask.tolist(), [[True]])
         self.assertTrue(np.isfinite(np.asarray(second)).all())
 
-    def test_session_decodes_one_pcm_frame_per_user_frame(self):
+    def test_session_primes_decoder_and_returns_one_frame_delayed_pcm(self):
         model = _StubDuplexModel()
         encoder = _StubAudioEncoder(hidden_size=8)
         decoder = _StubAudioDecoder()
@@ -166,8 +173,17 @@ class TestRaonDuplexStreaming(unittest.TestCase):
         self.assertTrue(second.emitted_audio)
         self.assertEqual(first.audio.shape, (1920,))
         self.assertEqual(second.audio.shape, (1920,))
+        self.assertEqual(first.decoded_frame_index, -1)
+        self.assertEqual(second.decoded_frame_index, 0)
+        self.assertFalse(first.decoded_emitted_audio)
+        self.assertFalse(second.decoded_emitted_audio)
+        np.testing.assert_array_equal(first.decoded_audio_codes, np.array([[4, 5, 6]]))
+        np.testing.assert_array_equal(second.decoded_audio_codes, np.array([[4, 5, 6]]))
+        np.testing.assert_array_equal(first.audio, np.full(1920, 15.0))
+        np.testing.assert_array_equal(second.audio, np.full(1920, 15.0))
         np.testing.assert_array_equal(decoder.codes[0], np.array([[4, 5, 6]]))
-        np.testing.assert_array_equal(decoder.codes[1], np.array([[1, 2, 3]]))
+        np.testing.assert_array_equal(decoder.codes[1], np.array([[4, 5, 6]]))
+        np.testing.assert_array_equal(decoder.codes[2], np.array([[1, 2, 3]]))
 
     def test_fixed_input_yields_only_complete_source_frames(self):
         model = _StubDuplexModel()
