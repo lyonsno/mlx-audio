@@ -196,11 +196,14 @@ class RaonStreamingAudioDecoder:
 @dataclass(frozen=True)
 class RaonDuplexAudioFrameResult:
     frame_index: int
+    decoded_frame_index: int
     state: Any
     frame_tokens: list[int]
     input_embedding_count: int
     emitted_audio: bool
     audio_codes: mx.array
+    decoded_emitted_audio: bool
+    decoded_audio_codes: mx.array
     audio: mx.array
 
 
@@ -241,6 +244,19 @@ class RaonDuplexSession:
             text_sampler=text_sampler,
             first_code_sampler=first_code_sampler,
         )
+        initial_emitted_audio = bool(self.state.machine_state.emitted_audio)
+        if initial_emitted_audio:
+            if self.state.audio_codes.ndim != 3 or self.state.audio_codes.shape[1] == 0:
+                raise ValueError(
+                    "Raon speak-first initialization emitted audio without codes."
+                )
+            initial_codes = self.state.audio_codes[:, -1]
+        else:
+            initial_codes = self.silence_codes
+        self._pending_audio = self._decode_frame(initial_codes)
+        self._pending_audio_codes = initial_codes
+        self._pending_emitted_audio = initial_emitted_audio
+        self._pending_frame_index = -1
         self.frame_index = 0
 
     def _encode_silence(self) -> mx.array:
@@ -252,6 +268,20 @@ class RaonDuplexSession:
         silence_codes = codes[:, :groups, 0]
         mx.eval(silence_codes)
         return silence_codes
+
+    def _decode_frame(self, codes: mx.array) -> mx.array:
+        decoded = self.audio_decoder.decode_frame(codes)
+        if decoded.ndim != 3 or decoded.shape[:2] != (1, 1):
+            raise ValueError(
+                "Raon duplex Mimi decode must return shape (1, 1, samples), "
+                f"got {decoded.shape}."
+            )
+        if decoded.shape[-1] != self.samples_per_frame:
+            raise ValueError(
+                "Raon duplex Mimi decode must return exactly "
+                f"{self.samples_per_frame} samples, got {decoded.shape[-1]}."
+            )
+        return decoded[0, 0]
 
     def step(self, audio_frame: Any) -> RaonDuplexAudioFrameResult:
         audio = np.asarray(audio_frame, dtype=np.float32).reshape(-1)
@@ -273,26 +303,23 @@ class RaonDuplexSession:
             if frame.emitted_codes is not None
             else self.silence_codes
         )
-        decoded = self.audio_decoder.decode_frame(codes)
-        if decoded.ndim != 3 or decoded.shape[:2] != (1, 1):
-            raise ValueError(
-                "Raon duplex Mimi decode must return shape (1, 1, samples), "
-                f"got {decoded.shape}."
-            )
-        if decoded.shape[-1] != self.samples_per_frame:
-            raise ValueError(
-                "Raon duplex Mimi decode must return exactly "
-                f"{self.samples_per_frame} samples, got {decoded.shape[-1]}."
-            )
+        decoded = self._decode_frame(codes)
         result = RaonDuplexAudioFrameResult(
             frame_index=self.frame_index,
+            decoded_frame_index=self._pending_frame_index,
             state=frame.state,
             frame_tokens=frame.frame_tokens,
             input_embedding_count=int(embeddings.shape[1]),
             emitted_audio=frame.emitted_audio,
             audio_codes=codes,
-            audio=decoded[0, 0],
+            decoded_emitted_audio=self._pending_emitted_audio,
+            decoded_audio_codes=self._pending_audio_codes,
+            audio=self._pending_audio,
         )
+        self._pending_audio = decoded
+        self._pending_audio_codes = codes
+        self._pending_emitted_audio = frame.emitted_audio
+        self._pending_frame_index = self.frame_index
         self.state = frame.state
         self.frame_index += 1
         return result
