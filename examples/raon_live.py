@@ -138,6 +138,7 @@ def converse(session, directory, input_device, output_device, status_path):
 
     exchange = AudioExchange()
     stop = threading.Event()
+    quit_requested = threading.Event()
     errors = []
     recorder = threading.Thread(
         target=record_audio, args=(exchange, directory, errors, stop)
@@ -155,7 +156,9 @@ def converse(session, directory, input_device, output_device, status_path):
 
     def stop_on_enter():
         try:
-            input()
+            command = input().strip().lower()
+            if command in {"q", "quit", "exit"}:
+                quit_requested.set()
         except EOFError:
             errors.append("terminal input closed")
         finally:
@@ -195,7 +198,7 @@ def converse(session, directory, input_device, output_device, status_path):
                     device=list(stream.device),
                     latency=list(stream.latency),
                 )
-                print("\nMIC LIVE. Talk normally. Press Enter to stop.\n", flush=True)
+                print("\nMIC LIVE. Enter: stop | q then Enter: quit.\n", flush=True)
                 threading.Thread(target=stop_on_enter, daemon=True).start()
                 while not stop.is_set():
                     chunk = exchange.inputs.get()
@@ -251,10 +254,26 @@ def converse(session, directory, input_device, output_device, status_path):
             pending_input_samples=int(pending.size),
             queued_input_blocks=exchange.inputs.qsize(),
             frames=frames_done,
+            quit_requested=quit_requested.is_set(),
             median_step_seconds=float(np.median(durations)) if durations else None,
         )
         print(f"\nMic closed. Recording: {directory}", flush=True)
-    return errors
+    return errors, quit_requested.is_set()
+
+
+def menu_command():
+    while True:
+        command = (
+            input("\nEnter: new conversation | q then Enter: quit > ").strip().lower()
+        )
+        if command in {"q", "quit", "exit"}:
+            return "quit"
+        if not command:
+            return "start"
+        print(
+            "Unrecognized command. Press Enter to start, or type q then Enter to quit.",
+            flush=True,
+        )
 
 
 def main():
@@ -325,8 +344,7 @@ def main():
         print("\nHeadphones recommended. Keep other voice apps quiet.", flush=True)
         number = 0
         while True:
-            command = input("\nEnter: new conversation | q + Enter: quit > ").strip()
-            if command.lower() == "q":
+            if menu_command() == "quit":
                 break
             number += 1
             phase = "session-create"
@@ -335,12 +353,14 @@ def main():
             directory = args.output_dir / f"conversation-{number:03d}"
             directory.mkdir()
             phase = "conversation"
-            errors = converse(
+            errors, quit_requested = converse(
                 session, directory, args.input_device, args.output_device, status_path
             )
             del session
             if errors:
                 raise RuntimeError("; ".join(errors))
+            if quit_requested:
+                break
             write_status(status_path, state="awaiting_operator", microphone_open=False)
         write_status(status_path, state="closed", conversations=number)
     except BaseException as exc:
