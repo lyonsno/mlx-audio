@@ -71,6 +71,34 @@ class TestLiveAudioExchange(unittest.TestCase):
             with self.assertRaises(ValueError):
                 exchange.push_audio(values)
 
+    def test_quit_during_conversation_reaches_outer_loop(self):
+        class Stream:
+            samplerate = 24000
+            device = (0, 1)
+            latency = (0.08, 0.08)
+
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with (
+                patch("sounddevice.Stream", Stream),
+                patch("builtins.input", return_value="Q"),
+            ):
+                result = self.demo.converse(
+                    None, directory, 0, 1, directory / "live.json"
+                )
+            self.assertEqual(
+                result, ([], True), "The quit command must not be swallowed as stop"
+            )
+
     def test_model_failure_closes_stream_and_preserves_captured_audio(self):
         from scipy.io import wavfile
 
@@ -108,7 +136,7 @@ class TestLiveAudioExchange(unittest.TestCase):
             directory = Path(temporary)
             with (
                 patch("sounddevice.Stream", Stream),
-                patch("builtins.input", side_effect=lambda: finished.wait()),
+                patch("builtins.input", side_effect=lambda: (finished.wait(), "")[1]),
             ):
                 with self.assertRaisesRegex(RuntimeError, "injected model failure"):
                     self.demo.converse(
@@ -122,6 +150,21 @@ class TestLiveAudioExchange(unittest.TestCase):
             np.testing.assert_array_equal(audio[:, 0], np.full(1920, 0.25))
             np.testing.assert_array_equal(audio[:, 1], np.zeros(1920))
         self.assertEqual(stream_closed, [True])
+
+    def test_menu_unknown_text_does_not_start_conversation(self):
+        with patch("builtins.input", side_effect=["q + enter", "Q"]) as read:
+            self.assertEqual(self.demo.menu_command(), "quit")
+            self.assertEqual(read.call_count, 2)
+
+    def test_menu_empty_line_starts_and_quit_aliases_exit(self):
+        for text, expected in [
+            ("", "start"),
+            ("q", "quit"),
+            ("quit", "quit"),
+            (" EXIT ", "quit"),
+        ]:
+            with self.subTest(text=text), patch("builtins.input", return_value=text):
+                self.assertEqual(self.demo.menu_command(), expected)
 
 
 if __name__ == "__main__":
