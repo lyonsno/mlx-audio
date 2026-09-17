@@ -13,7 +13,8 @@ from mlx_audio.stt.models.voxtral_realtime.streaming import (
     StreamingConvStem,
     StreamingEncoder,
 )
-from mlx_audio.utils import resample_audio
+
+from .audio import resample_input_frame
 
 INPUT_SAMPLE_RATE = 24_000
 ENCODER_SAMPLE_RATE = 16_000
@@ -136,14 +137,7 @@ class RaonStreamingAudioEncoder:
     def step(self, audio_frame: Any) -> tuple[mx.array, mx.array]:
         audio = _mono_audio_frame(audio_frame, self.samples_per_frame)
 
-        encoder_audio = np.asarray(
-            resample_audio(
-                audio,
-                self.input_sample_rate,
-                self.encoder_sample_rate,
-            ),
-            dtype=np.float32,
-        )
+        encoder_audio = resample_input_frame(audio)
         if encoder_audio.size != ENCODER_SAMPLES_PER_FRAME:
             raise ValueError(
                 "Raon duplex resampling must produce exactly "
