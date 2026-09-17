@@ -273,3 +273,69 @@ def test_sts_load_model_rejects_unsupported_generic_model(monkeypatch):
 
     with pytest.raises(ValueError, match="generic STS loader yet"):
         sts_utils.load_model("kyutai/moshiko-mlx-q4")
+
+
+@pytest.mark.parametrize(
+    "model_type,architecture,model_class",
+    [
+        ("raon", "RaonModel", "RaonTTSModel"),
+        ("raon_duplex", "RaonDuplexModel", "RaonDuplexModel"),
+    ],
+)
+@pytest.mark.parametrize("entrypoint", ["sts", "top_level", "server"])
+def test_raon_registry_and_loaders_agree(
+    monkeypatch, tmp_path, model_type, architecture, model_class, entrypoint
+):
+    import json
+
+    import mlx_audio.sts as sts
+    import mlx_audio.sts.models.raon as raon
+    import mlx_audio.utils as utils
+    from mlx_audio.registry import classify_model, is_supported_model
+
+    # Publisher root identities: Speech cd84c5bf, SpeechChat a8bac78f.
+    # An opaque local directory prevents repository-name fallback hiding a bug.
+    model_path = tmp_path / "opaque"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(
+        json.dumps({"model_type": model_type, "architectures": [architecture]})
+    )
+    sentinel = object()
+    calls = []
+
+    class Stub:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            calls.append((path, kwargs))
+            return sentinel
+
+    monkeypatch.setattr(raon, model_class, Stub)
+
+    if entrypoint == "sts":
+        result = sts.load(model_path)
+    elif entrypoint == "top_level":
+        result = utils.load_model(str(model_path))
+    else:
+        pytest.importorskip("fastapi")
+        pytest.importorskip("uvicorn")
+        from mlx_audio.server import ModelProvider
+
+        provider = ModelProvider()
+        result = provider.load_model(str(model_path))
+        assert provider.load_model(str(model_path)) is sentinel
+
+    assert result is sentinel
+    assert len(calls) == 1
+    assert calls[0][0] == str(model_path)
+    assert classify_model(model_type, str(model_path)) == "sts"
+    assert is_supported_model(model_type, str(model_path))
+
+
+def test_raon_name_does_not_override_generic_qwen_config(monkeypatch):
+    import mlx_audio.sts.utils as sts_utils
+
+    monkeypatch.setattr(
+        sts_utils, "load_config", lambda *args, **kwargs: {"model_type": "qwen3"}
+    )
+    with pytest.raises(ValueError, match="'qwen3'.*not supported"):
+        sts_utils.load("local-raon-qwen3")

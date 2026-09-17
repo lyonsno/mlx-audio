@@ -26,6 +26,8 @@ MODEL_REMAPPING = {
     "mossformer2": "mossformer2_se",
     "mossformer2_se": "mossformer2_se",
     "nemotron_voicechat": "nemotron_voicechat",
+    "raon": "raon",
+    "raon_duplex": "raon",
     "sam_audio": "sam_audio",
     "samaudio": "sam_audio",
 }
@@ -131,6 +133,26 @@ def load_model(
     ``from_pretrained(...)`` paths remain available for custom behavior.
     """
     model_type = _resolve_model_type(model_path, **kwargs)
+    if model_type == "raon":
+        from mlx_audio.sts.models import raon
+
+        source_type = model_type_from_config(load_config(model_path, **kwargs))
+        if source_type == "raon":
+            model_class = raon.RaonTTSModel
+        elif source_type == "raon_duplex":
+            model_class = raon.RaonDuplexModel
+        else:
+            raise ValueError(
+                "Raon loading requires an explicit raon or raon_duplex "
+                "checkpoint model_type."
+            )
+        return model_class.from_pretrained(
+            str(model_path),
+            revision=kwargs.get("revision"),
+            weight_files=kwargs.get("weight_files"),
+            weight_format=kwargs.get("weight_format"),
+        )
+
     if model_type == "moshi":
         from mlx_audio.sts.models.moshi import MoshiSTSModel
 
