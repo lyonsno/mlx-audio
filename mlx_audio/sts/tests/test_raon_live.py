@@ -34,6 +34,26 @@ class TestLiveAudioExchange(unittest.TestCase):
         np.testing.assert_array_equal(exchange.inputs.get_nowait(), source[:, 0])
         self.assertEqual(exchange.underflow_samples, 3)
 
+    def test_greedy_text_leaves_requested_acoustic_sampling_enabled(self):
+        sampler = lambda logits: np.argmax(logits, axis=-1)
+        args = SimpleNamespace(greedy_text=True, temperature=0.6, top_k=50, top_p=0.95)
+        options = self.demo.session_options(args, sampler)
+        self.assertTrue(options["do_sample"])
+        self.assertEqual(options["temperature"], 0.6)
+        self.assertEqual(options["top_k"], 50)
+        self.assertEqual(options["top_p"], 0.95)
+        self.assertIs(options["text_sampler"], sampler)
+        self.assertNotIn("first_code_sampler", options)
+
+    def test_sampled_text_does_not_install_a_greedy_override(self):
+        args = SimpleNamespace(greedy_text=False, temperature=0.9, top_k=66, top_p=0.95)
+        self.assertIsNone(self.demo.session_options(args)["text_sampler"])
+
+    def test_greedy_request_cannot_silently_fall_back_to_sampling(self):
+        args = SimpleNamespace(greedy_text=True, temperature=0.6, top_k=50, top_p=0.95)
+        with self.assertRaisesRegex(ValueError, "greedy"):
+            self.demo.session_options(args)
+
     def test_partial_output_and_multiple_chunks_preserve_order(self):
         exchange = self.demo.AudioExchange()
         exchange.push_audio(np.array([1, 2, 3], dtype=np.float32))
