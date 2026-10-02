@@ -276,6 +276,20 @@ def menu_command():
         )
 
 
+def session_options(args, greedy_sampler=None):
+    if args.greedy_text and not callable(greedy_sampler):
+        raise ValueError("The greedy text request requires an explicit argmax sampler")
+    return dict(
+        system_prompt="You are engaging in real-time conversation.",
+        speak_first=False,
+        do_sample=True,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        text_sampler=greedy_sampler if args.greedy_text else None,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
@@ -283,6 +297,10 @@ def main():
     parser.add_argument("--warmup-audio", type=Path, required=True)
     parser.add_argument("--input-device", type=int)
     parser.add_argument("--output-device", type=int)
+    parser.add_argument("--greedy-text", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.9)
+    parser.add_argument("--top-k", type=int, default=66)
+    parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     status_path = args.output_dir / "status.json"
@@ -298,20 +316,48 @@ def main():
         print("RAON SpeechChat | thinker 8-bit | local MLX Metal", flush=True)
         print("Loading and warming up. Microphone is CLOSED.", flush=True)
         write_status(status_path, state="loading", model=args.model)
+        if mx.default_device() != mx.gpu:
+            raise ValueError("The live RAON demo requires the MLX Metal GPU route")
         mx.random.seed(17)
         model = RaonDuplexModel.from_pretrained(args.model)
         nn.quantize(model.thinker, group_size=64, bits=8)
         mx.eval(model.parameters())
 
-        def new_session():
-            return model.create_duplex_session(
-                system_prompt="You are engaging in real-time conversation.",
-                speak_first=False,
-                do_sample=True,
-                temperature=0.9,
-                top_k=66,
-                top_p=0.95,
+        def greedy_text(logits):
+            return mx.argmax(logits, axis=-1)
+
+        options = session_options(args, greedy_text)
+        (args.output_dir / "configuration.json").write_text(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "backend": "mlx-metal",
+                    "mlx_version": mx.__version__,
+                    "device": str(mx.default_device()),
+                    "seed": 17,
+                    "thinker_quantization": {"bits": 8, "group_size": 64},
+                    "text_policy": "argmax" if args.greedy_text else "sampled",
+                    "acoustic_sampling": {
+                        "temperature": args.temperature,
+                        "top_k": args.top_k,
+                        "top_p": args.top_p,
+                    },
+                    "system_prompt": options["system_prompt"],
+                    "input_device": args.input_device,
+                    "output_device": args.output_device,
+                },
+                indent=2,
             )
+            + "\n"
+        )
+        print(
+            f"Text: {'argmax' if args.greedy_text else 'sampled'} | "
+            f"Acoustic sampling: {args.temperature}/{args.top_k}/{args.top_p}",
+            flush=True,
+        )
+
+        def new_session():
+            return model.create_duplex_session(**options)
 
         phase = "warmup"
         write_status(status_path, state="warming", microphone_open=False)
