@@ -769,6 +769,67 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 mx.array([[True, True]]),
             )
 
+    def test_low_precision_audio_insertion_preserves_replacement_values(self):
+        for dtype, value in ((mx.bfloat16, 1 / 512), (mx.float16, 1 / 4096)):
+            with self.subTest(dtype=dtype):
+                model = raon.RaonSpeechModel(
+                    self._config(raon.RaonSpeechConfig), codec=_FakeCodec(8)
+                )
+                model.thinker.embed_tokens.weight = mx.ones(
+                    model.thinker.embed_tokens.weight.shape, dtype=dtype
+                )
+                input_ids = mx.array([[7, raon.AUDIO_INPUT_PLACEHOLDER_ID, 8]])
+                audio = mx.full((1, 1, 8), value, dtype=dtype)
+                result = model.prepare_speech_embeddings(
+                    input_ids, audio, mx.array([[True]])
+                )
+                self.assertEqual(result.dtype, dtype)
+                np.testing.assert_array_equal(
+                    np.asarray(result[:, 1].astype(mx.float32)),
+                    np.full((1, 8), value, np.float32),
+                )
+                np.testing.assert_array_equal(
+                    np.asarray(result[:, [0, 2]].astype(mx.float32)),
+                    np.ones((1, 2, 8), np.float32),
+                )
+
+    def test_low_precision_duplex_feedback_preserves_replacement_values(self):
+        for dtype, value in ((mx.bfloat16, 1 / 512), (mx.float16, 1 / 4096)):
+            with self.subTest(dtype=dtype):
+                config = raon.RaonDuplexConfig.from_speech_config(
+                    self._config(raon.RaonSpeechConfig),
+                    state=raon.DuplexStateConfig(),
+                )
+                model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+                model.thinker.embed_tokens.weight = mx.ones(
+                    model.thinker.embed_tokens.weight.shape, dtype=dtype
+                )
+                model.feedback_embedding = lambda codes: mx.full(
+                    (1, 1, 8), value, dtype=dtype
+                )
+                result = model._prepare_duplex_embeddings(
+                    mx.array(
+                        [
+                            [
+                                raon.AUDIO_INPUT_PLACEHOLDER_ID,
+                                raon.AUDIO_OUTPUT_PLACEHOLDER_ID,
+                            ]
+                        ]
+                    ),
+                    mx.zeros((1, 0, 8), dtype=dtype),
+                    mx.zeros((1, 0), dtype=mx.bool_),
+                    mx.zeros((1, 1, 3), dtype=mx.int32),
+                )
+                self.assertEqual(result.dtype, dtype)
+                np.testing.assert_array_equal(
+                    np.asarray(result[:, 1].astype(mx.float32)),
+                    np.full((1, 8), value, np.float32),
+                )
+                np.testing.assert_array_equal(
+                    np.asarray(result[:, 0].astype(mx.float32)),
+                    np.ones((1, 8), np.float32),
+                )
+
     def test_speech_conditioning_rejects_compensating_batch_mismatches(self):
         config_type = getattr(raon, "RaonSpeechConfig", None)
         model_type = getattr(raon, "RaonSpeechModel", None)

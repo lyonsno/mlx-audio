@@ -986,8 +986,7 @@ class RaonSpeechModel(RaonTTSModel):
             mx.where(valid_audio_mask, audio_indices, flat_audio.shape[0])
         )[:valid_audio_count]
         valid_audio = flat_audio[valid_audio_positions].astype(inputs_embeds.dtype)
-        current = flat_inputs[placeholder_positions]
-        flat_inputs = flat_inputs.at[placeholder_positions].add(valid_audio - current)
+        flat_inputs[placeholder_positions] = valid_audio
         return flat_inputs.reshape(inputs_embeds.shape)
 
     def prefill_speech(
@@ -1262,8 +1261,7 @@ class RaonDuplexModel(RaonSpeechModel):
         )
         position = mx.sort(positions)[0]
         flat = inputs.reshape(-1, inputs.shape[-1])
-        current = flat[position]
-        flat = flat.at[position].add(feedback[0] - current)
+        flat[position] = feedback[0].astype(inputs.dtype)
         return flat.reshape(inputs.shape)
 
     def duplex_frame(
