@@ -295,13 +295,17 @@ def _scripted_predictor(tokens, max_symbols=2):
         next_state = mx.full((2, 1, 16), state + 1)
         return output, (next_state, next_state)
 
-    def joint(feature, prediction):
-        joints.append((float(prediction[0, 0, 0].item()), prediction.dtype))
+    def joint(prediction):
+        joints.append((float(prediction[0, 0, 0, 0].item()), prediction.dtype))
         token = next(predictions)
         return mx.array([float(i == token) for i in range(model.blank_id + 1)])
 
     model.decoder = predictor
-    model.joint = joint
+    model.joint.enc = lambda feature: mx.zeros(
+        (feature.shape[0], feature.shape[1], 16), dtype=feature.dtype
+    )
+    model.joint.pred = lambda prediction: prediction
+    model.joint.joint_net = [joint]
     return model, calls, joints
 
 
@@ -311,6 +315,13 @@ def test_greedy_predictor_reused_across_blanks_and_chunks(dtype):
     model, calls, joints = _scripted_predictor(
         [blank, blank, 1, 2, blank, blank, 3, blank]
     )
+    projections = []
+
+    def project(prediction):
+        projections.append(float(prediction[0, 0, 0].item()))
+        return prediction
+
+    model.joint.pred = project
     decoder = GreedyDecoderState(model)
     features = mx.zeros((1, 6, 32), dtype=dtype)
     assert decoder.decode(features[:, :0], 0) == []
@@ -326,6 +337,7 @@ def test_greedy_predictor_reused_across_blanks_and_chunks(dtype):
     assert [value for value, _ in joints] == [0, 0, 0, 1, 2, 2, 2, 3]
     assert all(actual_dtype == dtype for _, actual_dtype in joints)
     assert calls == [None, 1, 2, 3]
+    assert projections == [0, 1, 2, 3]
 
 
 def test_nonchunked_decode_reuses_predictor_and_respects_encoded_length():
@@ -342,6 +354,13 @@ def test_nonchunked_decode_reuses_predictor_and_respects_encoded_length():
 def test_live_predictor_cache_survives_steps_and_resets():
     blank = len(_tiny_config()["vocabulary"])
     model, calls, joints = _scripted_predictor([blank, blank, 2, blank, blank])
+    projections = []
+
+    def project(prediction):
+        projections.append(float(prediction[0, 0, 0].item()))
+        return prediction
+
+    model.joint.pred = project
     session = model.create_streaming_session()
     session._encoded.append(mx.zeros((1, 4, 32)))
     session._flushed = True
@@ -351,13 +370,49 @@ def test_live_predictor_cache_survives_steps_and_resets():
     assert parts == ["hello"]
     assert [value for value, _ in joints] == [0, 0, 0, 1, 1]
     assert calls == [None, 2]
+    assert projections == [0, 1]
     session.reset()
-    model.joint = lambda feature, prediction: mx.array([0.0] * blank + [1.0])
+    model.joint.joint_net = [lambda prediction: mx.array([0.0] * blank + [1.0])]
     session._encoded.append(mx.zeros((1, 1, 32)))
     session._flushed = True
     assert session.step() == []
     assert session.done
     assert calls == [None, 2, None]
+    assert projections == [0, 1, 0]
+
+
+def test_projection_cache_tracks_feature_dtype():
+    blank = len(_tiny_config()["vocabulary"])
+    model, _, _ = _scripted_predictor([blank] * 4)
+    projections = []
+
+    def project(prediction):
+        projections.append(prediction.dtype)
+        return prediction
+
+    model.joint.pred = project
+    decoder = GreedyDecoderState(model)
+    for frame, dtype in enumerate([mx.float32, mx.float32, mx.float16, mx.float32]):
+        assert decoder.decode(mx.zeros((1, 1, 32), dtype=dtype), frame) == []
+    assert projections == [mx.float32, mx.float16, mx.float32]
+
+
+@pytest.mark.parametrize("activation", ["relu", "sigmoid", "tanh"])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16])
+def test_joint_matches_explicit_projections(activation, dtype):
+    mx.random.seed(42)
+    config = _tiny_config()
+    config["joint"]["activation"] = activation
+    model = Model(ModelConfig.from_dict(config))
+    feature = mx.random.normal((1, 3, 32)).astype(dtype)
+    prediction = mx.random.normal((1, 2, 16)).astype(dtype)
+    expected = mx.expand_dims(model.joint.enc(feature), 2) + mx.expand_dims(
+        model.joint.pred(prediction), 1
+    )
+    for layer in model.joint.joint_net:
+        expected = layer(expected)
+    actual = model.joint(feature, prediction)
+    np.testing.assert_array_equal(np.array(actual), np.array(expected))
 
 
 @pytest.mark.requires_weights

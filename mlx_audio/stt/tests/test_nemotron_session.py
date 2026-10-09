@@ -13,14 +13,14 @@ def model():
     # One visible token followed by blank, repeated for every encoder frame.
     calls = [0]
 
-    def joint(feature, output):
+    def joint(output):
         token = 2 if calls[0] % 2 == 0 else result.blank_id
         calls[0] += 1
         return mx.array(
             [0.0 if i != token else 1.0 for i in range(result.blank_id + 1)]
         )
 
-    result.joint = joint
+    result.joint.joint_net[-1] = joint
     return result
 
 
@@ -117,7 +117,7 @@ def test_cooperative_budget_and_decoder_state():
 
 def test_silence_has_bounded_state_and_independent_sessions():
     m = model()
-    m.joint = lambda feature, output: mx.array([0.0] * m.blank_id + [1.0])
+    m.joint.joint_net[-1] = lambda output: mx.array([0.0] * m.blank_id + [1.0])
     first = m.create_streaming_session()
     second = m.create_streaming_session()
     for _ in range(1000):
@@ -152,11 +152,11 @@ def test_special_tokens_and_symbol_cap_across_steps():
     m.max_symbols = 2
     predictions = iter([1, 2, m.blank_id])
 
-    def joint(feature, output):
+    def joint(output):
         predicted = next(predictions)
         return mx.array([float(i == predicted) for i in range(m.blank_id + 1)])
 
-    m.joint = joint
+    m.joint.joint_net[-1] = joint
     session = m.create_streaming_session()
     session.feed(np.zeros(20000))
     assert session.step(max_decode_tokens=1) == []  # frontend lookahead

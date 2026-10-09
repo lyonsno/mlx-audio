@@ -19,6 +19,7 @@ class GreedyDecoderState:
         self.last_token = model.blank_id
         self.hidden = None
         self._prediction = None
+        self._prediction_dtype = None
 
     def decode(self, features, start_frame):
         from mlx_audio.stt.models.nemo.alignment import AlignedToken
@@ -37,16 +38,21 @@ class GreedyDecoderState:
             symbols = 0
             while True:
                 # Blanks advance only the audio clock, not the predictor state.
-                if self._prediction is None:
+                if self._prediction is None or self._prediction_dtype != feature.dtype:
                     current = (
                         mx.array([[self.last_token]], dtype=mx.int32)
                         if self.last_token != model.blank_id
                         else None
                     )
-                    self._prediction = model.decoder(current, self.hidden)
+                    output, hidden = model.decoder(current, self.hidden)
+                    self._prediction = (
+                        model.joint.pred(output.astype(feature.dtype)),
+                        hidden,
+                    )
+                    self._prediction_dtype = feature.dtype
                 prediction, (h, c) = self._prediction
                 token = int(
-                    mx.argmax(model.joint(feature, prediction.astype(feature.dtype)))
+                    mx.argmax(model.joint._joint(model.joint.enc(feature), prediction))
                 )
                 if token == model.blank_id:
                     break
@@ -146,8 +152,10 @@ class JointNetwork(nn.Module):
         ]
 
     def __call__(self, enc: mx.array, pred: mx.array) -> mx.array:
-        enc = self.enc(enc)
-        pred = self.pred(pred)
+        return self._joint(self.enc(enc), self.pred(pred))
+
+    def _joint(self, enc: mx.array, pred: mx.array) -> mx.array:
+        """Combine projected encoder and predictor features."""
         x = mx.expand_dims(enc, 2) + mx.expand_dims(pred, 1)
         for layer in self.joint_net:
             x = layer(x)
