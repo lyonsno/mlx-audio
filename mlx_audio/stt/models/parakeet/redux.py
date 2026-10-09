@@ -345,25 +345,31 @@ class ParakeetRedux(ParakeetTDT):
             length = int(lengths[b])
             hidden, cell = self._make_initial_decoder_state(1, features.dtype)
             last_token, frame = self.blank_id, 0
+            predictor_cache = None
             hypothesis = []
             # Photon bounds total decode work, and advances blank/zero-duration
             # emissions immediately instead of retrying them at the same frame.
             for _ in range(self.max_symbols * length):
                 if frame >= length:
                     break
-                token, duration, next_hidden, next_cell = self._compiled_tdt_step(
-                    features[b : b + 1, frame : frame + 1],
-                    mx.array([[last_token]], dtype=mx.int32),
-                    hidden,
-                    cell,
+                token, duration, next_hidden, next_cell, decoder_output = (
+                    self._compiled_tdt_step(
+                        features[b : b + 1, frame : frame + 1],
+                        mx.array([[last_token]], dtype=mx.int32),
+                        hidden,
+                        cell,
+                        predictor_cache,
+                    )
                 )
-                mx.eval(token, duration, next_hidden, next_cell)
+                mx.eval(token, duration, next_hidden, next_cell, decoder_output)
+                predictor_cache = (decoder_output, next_hidden, next_cell)
                 token = int(token)
                 duration = self.durations[int(duration)]
                 if token == self.blank_id:
                     duration = max(duration, 1)
                 else:
                     last_token, hidden, cell = token, next_hidden, next_cell
+                    predictor_cache = None
                     if not tokenizer.is_special_token(token, self.vocabulary):
                         hypothesis.append(
                             AlignedToken(

@@ -301,11 +301,12 @@ def test_blank_zero_duration_advances_without_committing_state(checkpoint):
     model = load(path)
     model.encoder = Mock(return_value=(mx.zeros((1, 3, 128)), mx.array([3])))
     state = mx.ones((2, 1, 16))
+    prediction = mx.ones((1, 1, 16))
     step = Mock(
         side_effect=[
-            (mx.array(32), mx.array(0), state, state),
-            (mx.array(3), mx.array(1), state * 2, state * 2),
-            (mx.array(32), mx.array(0), state * 3, state * 3),
+            (mx.array(32), mx.array(0), state, state, prediction),
+            (mx.array(3), mx.array(1), state, state, prediction),
+            (mx.array(32), mx.array(0), state * 2, state * 2, prediction * 2),
         ]
     )
     model._compiled_tdt_step = step
@@ -313,7 +314,10 @@ def test_blank_zero_duration_advances_without_committing_state(checkpoint):
     assert result.text.strip() == "word3"
     assert step.call_count == 3
     np.testing.assert_array_equal(step.call_args_list[1].args[2], mx.zeros((2, 1, 16)))
-    np.testing.assert_array_equal(step.call_args_list[2].args[2], state * 2)
+    np.testing.assert_array_equal(step.call_args_list[2].args[2], state)
+    assert step.call_args_list[0].args[4] is None
+    np.testing.assert_array_equal(step.call_args_list[1].args[4][0], prediction)
+    assert step.call_args_list[2].args[4] is None
     assert result.sentences[0].tokens[0].start == pytest.approx(0.02)
 
 

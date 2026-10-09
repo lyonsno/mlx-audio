@@ -532,17 +532,21 @@ class ParakeetTDT(Model):
         current_token: mx.array,
         hidden: mx.array,
         cell: mx.array,
-    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
-        embedded = self.decoder.prediction["embed"](current_token)
-        blank_mask = mx.expand_dims(current_token == self.blank_id, axis=-1)
-        embedded = mx.where(blank_mask, mx.zeros_like(embedded), embedded)
+        predictor_cache: tuple[mx.array, mx.array, mx.array] | None = None,
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+        if predictor_cache is None:
+            embedded = self.decoder.prediction["embed"](current_token)
+            blank_mask = mx.expand_dims(current_token == self.blank_id, axis=-1)
+            embedded = mx.where(blank_mask, mx.zeros_like(embedded), embedded)
 
-        decoder_output, (hidden_out, cell_out) = self.decoder.prediction["dec_rnn"](
-            embedded, (hidden, cell)
-        )
-        decoder_output = decoder_output.astype(feature.dtype)
-        hidden_out = hidden_out.astype(feature.dtype)
-        cell_out = cell_out.astype(feature.dtype)
+            decoder_output, (hidden_out, cell_out) = self.decoder.prediction["dec_rnn"](
+                embedded, (hidden, cell)
+            )
+            decoder_output = decoder_output.astype(feature.dtype)
+            hidden_out = hidden_out.astype(feature.dtype)
+            cell_out = cell_out.astype(feature.dtype)
+        else:
+            decoder_output, hidden_out, cell_out = predictor_cache
 
         joint_output = self.joint(feature, decoder_output)
         pred_token = mx.argmax(joint_output[0, 0, :, : self.blank_id + 1]).astype(
@@ -551,7 +555,7 @@ class ParakeetTDT(Model):
         decision = mx.argmax(joint_output[0, 0, :, self.blank_id + 1 :]).astype(
             mx.int32
         )
-        return pred_token, decision, hidden_out, cell_out
+        return pred_token, decision, hidden_out, cell_out, decoder_output
 
     def decode(self, mel: mx.array) -> list[AlignedResult]:
         """
@@ -577,15 +581,24 @@ class ParakeetTDT(Model):
             time = 0
             new_symbols = 0
             decoder_hidden = self._make_initial_decoder_state(1, features.dtype)
+            predictor_cache = None
 
             while time < max_length:
                 feature = features[:, time : time + 1]
 
                 current_token = mx.array([[last_token]], dtype=mx.int32)
-                pred_token, decision, hidden, cell = self._compiled_tdt_step(
-                    feature, current_token, decoder_hidden[0], decoder_hidden[1]
+                pred_token, decision, hidden, cell, decoder_output = (
+                    self._compiled_tdt_step(
+                        feature,
+                        current_token,
+                        decoder_hidden[0],
+                        decoder_hidden[1],
+                        predictor_cache,
+                    )
                 )
-                mx.eval(pred_token, decision, hidden, cell)
+                mx.eval(pred_token, decision, hidden, cell, decoder_output)
+                # Blanks leave predictor inputs unchanged, including its proposed state.
+                predictor_cache = (decoder_output, hidden, cell)
 
                 pred_token_i = int(pred_token)
                 decision_i = int(decision)
@@ -594,6 +607,7 @@ class ParakeetTDT(Model):
                 if pred_token_i != self.blank_id:
                     last_token = pred_token_i
                     decoder_hidden = (hidden, cell)
+                    predictor_cache = None
                     if not tokenizer.is_special_token(last_token, self.vocabulary):
                         hypothesis.append(
                             AlignedToken(
