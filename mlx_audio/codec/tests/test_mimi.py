@@ -225,9 +225,8 @@ class TestMimi(unittest.TestCase):
         cfg = mimi_202407(32, transformers_compatible=True)
 
         self.assertFalse(cfg.transformer.rope_traditional)
-        self.assertFalse(cfg.transformer.gelu_approximate)
+        self.assertEqual(cfg.transformer.gelu, "erf")
 
-        layer = MlpNoGating(cfg.transformer)
         inputs = mx.zeros((1, 1, cfg.transformer.d_model))
         with (
             patch(
@@ -239,6 +238,7 @@ class TestMimi(unittest.TestCase):
                 side_effect=lambda value: value,
             ) as approximate_gelu,
         ):
+            layer = MlpNoGating(cfg.transformer)
             layer(inputs)
 
         exact_gelu.assert_called_once()
@@ -248,7 +248,7 @@ class TestMimi(unittest.TestCase):
         cfg = mimi_202407(32)
 
         self.assertTrue(cfg.transformer.rope_traditional)
-        self.assertTrue(cfg.transformer.gelu_approximate)
+        self.assertEqual(cfg.transformer.gelu, "tanh")
 
     def test_load_transformers_weights_uses_sanitizer_and_finalizes_state(self):
         model = Mimi(mimi_202407(2, transformers_compatible=True))

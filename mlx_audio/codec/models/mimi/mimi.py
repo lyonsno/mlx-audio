@@ -82,7 +82,7 @@ def mimi_202407(
         dim_feedforward=2048,
         conv_layout=True,
         rope_traditional=not transformers_compatible,
-        gelu_approximate=not transformers_compatible,
+        gelu="erf" if transformers_compatible else "tanh",
         use_conv_block=False,
         cross_attention=False,
         conv_kernel_size=3,
@@ -357,7 +357,7 @@ class Mimi(nn.Module):
         strict: bool = True,
     ) -> nn.Module:
         transformer = self.cfg.transformer
-        if transformer.rope_traditional or transformer.gelu_approximate:
+        if transformer.rope_traditional or transformer.gelu != "erf":
             raise ValueError(
                 "Transformers Mimi weights require split-half RoPE and exact GELU; "
                 "construct the model with mimi_202407(..., transformers_compatible=True)"
