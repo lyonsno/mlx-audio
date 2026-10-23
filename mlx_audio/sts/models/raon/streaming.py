@@ -224,6 +224,7 @@ class RaonDuplexSession:
         speak_first: bool = False,
         text_sampler: Optional[Callable] = None,
         first_code_sampler: Optional[Callable] = None,
+        hybrid_text: bool = False,
     ) -> None:
         self.model = model
         self.audio_encoder = audio_encoder or RaonStreamingAudioEncoder(
@@ -233,6 +234,7 @@ class RaonDuplexSession:
         self.audio_decoder = audio_decoder or RaonStreamingAudioDecoder(model.codec)
         self.text_sampler = text_sampler
         self.first_code_sampler = first_code_sampler
+        self.hybrid_text = hybrid_text
         self.samples_per_frame = int(model.sample_rate / FRAME_RATE)
         if self.samples_per_frame != INPUT_SAMPLES_PER_FRAME:
             raise ValueError(
@@ -246,6 +248,7 @@ class RaonDuplexSession:
             speak_first=speak_first,
             text_sampler=text_sampler,
             first_code_sampler=first_code_sampler,
+            hybrid_text=hybrid_text,
         )
         initial_emitted_audio = bool(self.state.machine_state.emitted_audio)
         if initial_emitted_audio:
@@ -299,6 +302,7 @@ class RaonDuplexSession:
             audio_input_embeds_mask=mask,
             text_sampler=self.text_sampler,
             first_code_sampler=self.first_code_sampler,
+            hybrid_text=self.hybrid_text,
         )
         codes = (
             frame.emitted_codes

@@ -46,8 +46,22 @@ class TestLiveAudioExchange(unittest.TestCase):
         self.assertNotIn("first_code_sampler", options)
 
     def test_sampled_text_does_not_install_a_greedy_override(self):
-        args = SimpleNamespace(greedy_text=False, temperature=0.9, top_k=66, top_p=0.95)
-        self.assertIsNone(self.demo.session_options(args)["text_sampler"])
+        args = SimpleNamespace(
+            greedy_text=False, sampled_text=True,
+            temperature=0.9, top_k=66, top_p=0.95,
+        )
+        options = self.demo.session_options(args)
+        self.assertIsNone(options["text_sampler"])
+        self.assertFalse(options["hybrid_text"])
+
+    def test_live_default_uses_exercised_hybrid_route(self):
+        args = SimpleNamespace(greedy_text=False, temperature=0.6, top_k=50, top_p=0.95)
+        options = self.demo.session_options(args)
+        self.assertTrue(options["hybrid_text"])
+        self.assertEqual(
+            (options["temperature"], options["top_k"], options["top_p"]),
+            (0.6, 50, 0.95),
+        )
 
     def test_greedy_request_cannot_silently_fall_back_to_sampling(self):
         args = SimpleNamespace(greedy_text=True, temperature=0.6, top_k=50, top_p=0.95)

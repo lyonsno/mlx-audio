@@ -235,6 +235,22 @@ class TestRaonDuplexStreaming(unittest.TestCase):
         self.assertIsNotNone(model.init_kwargs["text_sampler"])
         self.assertIsNotNone(model.init_kwargs["first_code_sampler"])
 
+    def test_hybrid_mode_reaches_initialization_and_every_frame(self):
+        model = _StubDuplexModel()
+        session = raon.RaonDuplexModel.create_duplex_session(
+            model,
+            system_tokens=mx.array([7], dtype=mx.int32),
+            hybrid_text=True,
+            audio_encoder=_StubAudioEncoder(hidden_size=8),
+            audio_decoder=_StubAudioDecoder(),
+            silence_codes=mx.array([[4, 5, 6]], dtype=mx.int32),
+        )
+
+        session.step(np.zeros(1920, dtype=np.float32))
+
+        self.assertTrue(model.init_kwargs["hybrid_text"])
+        self.assertTrue(model.frame_calls[0]["hybrid_text"])
+
     def test_model_entrypoint_defaults_to_empty_source_prompt(self):
         class Tokenizer:
             def apply_chat_template(self, *args, **kwargs):

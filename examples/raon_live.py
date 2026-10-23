@@ -279,6 +279,9 @@ def menu_command():
 def session_options(args, greedy_sampler=None):
     if args.greedy_text and not callable(greedy_sampler):
         raise ValueError("The greedy text request requires an explicit argmax sampler")
+    sampled_text = getattr(args, "sampled_text", False)
+    if args.greedy_text and sampled_text:
+        raise ValueError("Choose either greedy or sampled text, not both")
     return dict(
         system_prompt="You are engaging in real-time conversation.",
         speak_first=False,
@@ -287,6 +290,7 @@ def session_options(args, greedy_sampler=None):
         top_k=args.top_k,
         top_p=args.top_p,
         text_sampler=greedy_sampler if args.greedy_text else None,
+        hybrid_text=not (args.greedy_text or sampled_text),
     )
 
 
@@ -298,8 +302,9 @@ def main():
     parser.add_argument("--input-device", type=int)
     parser.add_argument("--output-device", type=int)
     parser.add_argument("--greedy-text", action="store_true")
-    parser.add_argument("--temperature", type=float, default=0.9)
-    parser.add_argument("--top-k", type=int, default=66)
+    parser.add_argument("--sampled-text", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
@@ -320,7 +325,10 @@ def main():
             raise ValueError("The live RAON demo requires the MLX Metal GPU route")
         mx.random.seed(17)
         model = RaonDuplexModel.from_pretrained(args.model)
+        if not model.config.state.use_duplex_end_pad:
+            raise ValueError("The live hybrid route requires masked duplex state")
         nn.quantize(model.thinker, group_size=64, bits=8)
+        model.lm_head.set_dtype(mx.float32)
         mx.eval(model.parameters())
 
         def greedy_text(logits):
@@ -336,7 +344,16 @@ def main():
                     "device": str(mx.default_device()),
                     "seed": 17,
                     "thinker_quantization": {"bits": 8, "group_size": 64},
-                    "text_policy": "argmax" if args.greedy_text else "sampled",
+                    "text_policy": (
+                        "argmax" if args.greedy_text else
+                        "sampled" if args.sampled_text else
+                        "sampled-controls-greedy-words"
+                    ),
+                    "text_head_dtype": str(model.lm_head.weight.dtype),
+                    "text_projection": (
+                        "prediction-position-control-sparse"
+                        if options["hybrid_text"] else "full"
+                    ),
                     "acoustic_sampling": {
                         "temperature": args.temperature,
                         "top_k": args.top_k,
@@ -350,8 +367,12 @@ def main():
             )
             + "\n"
         )
+        text_policy = (
+            "argmax" if args.greedy_text else
+            "sampled" if args.sampled_text else "hybrid"
+        )
         print(
-            f"Text: {'argmax' if args.greedy_text else 'sampled'} | "
+            f"Text: {text_policy} | "
             f"Acoustic sampling: {args.temperature}/{args.top_k}/{args.top_p}",
             flush=True,
         )

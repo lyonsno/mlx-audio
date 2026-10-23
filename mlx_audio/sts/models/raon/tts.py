@@ -37,8 +37,10 @@ from .duplex import (
     AUDIO_OUTPUT_SIL_ID,
     AUDIO_START_ID,
     DuplexMachineState,
+    DuplexPhase,
     DuplexStateConfig,
     DuplexStateManager,
+    _BLOCKED_STRUCTURAL,
 )
 
 AUDIO_END_ID = 151670
@@ -1053,12 +1055,90 @@ class RaonDuplexModel(RaonSpeechModel):
             raise ValueError("Raon duplex decoding currently requires batch size 1.")
         return input_ids
 
+    def _duplex_control_ids(
+        self, machine_state: DuplexMachineState
+    ) -> Optional[list[int]]:
+        cfg = self.config.state
+        if machine_state.phase == DuplexPhase.SIL:
+            ids = [cfg.duplex_sil_token_id, cfg.duplex_end_pad_token_id]
+            if cfg.use_backchannel_token:
+                ids.append(cfg.duplex_bc_token_id)
+            return ids
+        context = self.state_manager._extract_context_token(machine_state)
+        onsets = {cfg.duplex_end_pad_token_id}
+        if cfg.use_backchannel_token:
+            onsets.add(cfg.duplex_bc_token_id)
+        if context in onsets or (
+            context is not None
+            and context not in (
+                _BLOCKED_STRUCTURAL
+                | onsets
+                | {cfg.duplex_pad_token_id, cfg.duplex_sil_token_id}
+            )
+        ):
+            return None
+        return [
+            cfg.duplex_pad_token_id,
+            cfg.duplex_end_pad_token_id,
+            cfg.duplex_sil_token_id,
+        ]
+
+    def _project_duplex_text(
+        self, normalized: mx.array, machine_state: DuplexMachineState
+    ) -> mx.array:
+        if normalized.shape[1] < 2:
+            raise ValueError("Duplex prediction requires at least two positions.")
+        prediction = normalized[:, -2:-1, :]
+        ids = self._duplex_control_ids(machine_state)
+        if ids is None:
+            selected = self.lm_head(prediction)
+        else:
+            indices = mx.array(ids, dtype=mx.int32)
+            scores = prediction @ self.lm_head.weight[indices].T
+            selected = mx.zeros(
+                (normalized.shape[0], 1, self.config.thinker.vocab_size),
+                dtype=scores.dtype,
+            ).at[:, :, indices].add(scores)
+        before = mx.zeros(
+            (normalized.shape[0], normalized.shape[1] - 2, selected.shape[-1]),
+            dtype=selected.dtype,
+        )
+        after = mx.zeros(
+            (normalized.shape[0], 1, selected.shape[-1]), dtype=selected.dtype
+        )
+        return mx.concatenate((before, selected, after), axis=1)
+
+    def _forward(
+        self,
+        input_ids: mx.array,
+        thinker_cache: list[KVCache],
+        talker_cache: list[KVCache],
+        input_embeddings: Optional[mx.array] = None,
+        *,
+        machine_state: Optional[DuplexMachineState] = None,
+        hybrid_text: bool = False,
+    ) -> tuple[mx.array, mx.array]:
+        if not hybrid_text:
+            return super()._forward(
+                input_ids, thinker_cache, talker_cache, input_embeddings
+            )
+        if machine_state is None or not self.config.state.use_duplex_end_pad:
+            raise ValueError("Hybrid duplex projection requires masked machine state.")
+        accepted, normalized = self.thinker(
+            input_ids, cache=thinker_cache, input_embeddings=input_embeddings
+        )
+        text_logits = self._project_duplex_text(normalized, machine_state)
+        talker_inputs = self.speech.thinker_to_talker_proj(accepted)
+        talker_hidden = self.speech.talker(talker_inputs, cache=talker_cache)
+        return talker_hidden, text_logits
+
     def _select_text_token(
         self,
         text_logits: mx.array,
         machine_state: DuplexMachineState,
         sampler: Optional[Callable[[mx.array], Any]],
         forced_id: Optional[int] = None,
+        hybrid_text: bool = False,
     ) -> int:
         if forced_id is not None:
             return forced_id
@@ -1067,15 +1147,25 @@ class RaonDuplexModel(RaonSpeechModel):
                 "Raon duplex text logits must include the token preceding audio output."
             )
         logits = text_logits[:, -2:-1, : self.config.thinker.vocab_size]
+        if hybrid_text:
+            if sampler is None or not self.config.state.use_duplex_end_pad:
+                raise ValueError(
+                    "Hybrid duplex text requires sampling and masked state."
+                )
+            pad_id = self.config.state.duplex_pad_token_id
+            logits = logits.at[:, :, pad_id].add(-2.0)
         if self.config.state.use_duplex_end_pad:
             logits = self.state_manager.apply_logit_mask(
                 logits,
                 machine_state,
                 self.config.thinker.vocab_size,
             )
+        choose_greedy = sampler is None or (
+            hybrid_text and self._duplex_control_ids(machine_state) is None
+        )
         selected = (
             mx.argmax(logits[:, -1], axis=-1)
-            if sampler is None
+            if choose_greedy
             else sampler(logits[:, -1])
         )
         if isinstance(selected, mx.array):
@@ -1119,12 +1209,14 @@ class RaonDuplexModel(RaonSpeechModel):
         text_sampler: Optional[Callable[[mx.array], Any]],
         first_code_sampler: Optional[Callable[[mx.array], Any]],
         forced_id: Optional[int] = None,
+        hybrid_text: bool = False,
     ) -> RaonDuplexFrameResult:
         predicted_id = self._select_text_token(
             text_logits,
             state.machine_state,
             text_sampler,
             forced_id=forced_id,
+            hybrid_text=hybrid_text,
         )
         machine_state, frame_tokens, emitted_audio = self.state_manager.transition(
             state.machine_state,
@@ -1168,6 +1260,7 @@ class RaonDuplexModel(RaonSpeechModel):
         speak_first: bool = False,
         text_sampler: Optional[Callable[[mx.array], Any]] = None,
         first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+        hybrid_text: bool = False,
     ) -> RaonDuplexFrameState:
         system_tokens = self._as_batch(system_tokens)
         initial_tokens = mx.concatenate(
@@ -1179,10 +1272,13 @@ class RaonDuplexModel(RaonSpeechModel):
         )
         thinker_cache = self.thinker.make_cache()
         talker_cache = self.speech.talker.make_cache()
+        machine_state = self.state_manager.initial_state(speak_first=speak_first)
         talker_hidden, text_logits = self._forward(
             initial_tokens,
             thinker_cache,
             talker_cache,
+            machine_state=machine_state,
+            hybrid_text=hybrid_text,
         )
         empty_codes = mx.zeros(
             (1, 0, self.config.components.code_predictor.num_code_groups),
@@ -1193,7 +1289,7 @@ class RaonDuplexModel(RaonSpeechModel):
             audio_codes=empty_codes,
             thinker_cache=thinker_cache,
             talker_cache=talker_cache,
-            machine_state=self.state_manager.initial_state(speak_first=speak_first),
+            machine_state=machine_state,
             forced_sil_remaining=(
                 2 if not speak_first and self.config.state.use_sil_token else 0
             ),
@@ -1205,6 +1301,7 @@ class RaonDuplexModel(RaonSpeechModel):
             text_sampler=text_sampler,
             first_code_sampler=first_code_sampler,
             forced_id=self.state_manager.initial_forced_prediction_id(speak_first),
+            hybrid_text=hybrid_text,
         )
         return result.state
 
@@ -1272,6 +1369,7 @@ class RaonDuplexModel(RaonSpeechModel):
         audio_input_embeds_mask: mx.array,
         text_sampler: Optional[Callable[[mx.array], Any]] = None,
         first_code_sampler: Optional[Callable[[mx.array], Any]] = None,
+        hybrid_text: bool = False,
     ) -> RaonDuplexFrameResult:
         frame_tokens = state.machine_state.last_frame_tokens
         input_ids = mx.array([frame_tokens], dtype=mx.int32)
@@ -1291,6 +1389,8 @@ class RaonDuplexModel(RaonSpeechModel):
             state.thinker_cache,
             state.talker_cache,
             input_embeddings=inputs,
+            machine_state=state.machine_state,
+            hybrid_text=hybrid_text,
         )
         return self._transition(
             state=state,
@@ -1303,6 +1403,7 @@ class RaonDuplexModel(RaonSpeechModel):
                 if state.forced_sil_remaining
                 else None
             ),
+            hybrid_text=hybrid_text,
         )
 
     def create_duplex_session(
@@ -1320,6 +1421,7 @@ class RaonDuplexModel(RaonSpeechModel):
         audio_encoder: Optional[Any] = None,
         audio_decoder: Optional[Any] = None,
         silence_codes: Optional[mx.array] = None,
+        hybrid_text: bool = False,
     ) -> Any:
         """Create one stateful raw-audio-to-PCM duplex session."""
         from .streaming import RaonDuplexSession, prepare_duplex_prompt
@@ -1346,6 +1448,8 @@ class RaonDuplexModel(RaonSpeechModel):
                 )
         elif text_sampler is not None or first_code_sampler is not None:
             raise ValueError("Raon duplex custom samplers require do_sample=True.")
+        if hybrid_text and not do_sample:
+            raise ValueError("Hybrid duplex text requires sampling.")
         return RaonDuplexSession(
             self,
             system_tokens,
@@ -1355,6 +1459,7 @@ class RaonDuplexModel(RaonSpeechModel):
             speak_first=speak_first,
             text_sampler=text_sampler,
             first_code_sampler=first_code_sampler,
+            hybrid_text=hybrid_text,
         )
 
     def generate_duplex(

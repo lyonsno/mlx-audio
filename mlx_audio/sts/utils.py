@@ -140,17 +140,22 @@ def load_model(
         if version not in (1, 2, 3):
             raise ValueError("Unsupported version. Choose from 1, 2, or 3.")
         subfolder = f"v{version}"
+    resolution_kwargs = {
+        name: kwargs[name]
+        for name in ("revision", "force_download", "allow_patterns")
+        if name in kwargs
+    }
     if subfolder is not None:
-        model_path = get_model_path(str(model_path), **kwargs) / subfolder
+        model_path = get_model_path(str(model_path), **resolution_kwargs) / subfolder
         if not model_path.is_dir():
             raise FileNotFoundError(f"Model subfolder not found: {model_path}")
-    model_type = _resolve_model_type(model_path, **kwargs)
+    model_type = _resolve_model_type(model_path, **resolution_kwargs)
     if version is not None and model_type != "deepfilternet":
         raise ValueError("version selection is only supported for DeepFilterNet")
     if model_type == "raon":
         from mlx_audio.sts.models import raon
 
-        source_type = model_type_from_config(load_config(model_path, **kwargs))
+        source_type = model_type_from_config(load_config(model_path, **resolution_kwargs))
         if source_type == "raon":
             model_class = raon.RaonTTSModel
         elif source_type == "raon_duplex":

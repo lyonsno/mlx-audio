@@ -315,6 +315,69 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 lambda _: raon.AUDIO_OUTPUT_PAD_ID,
             )
 
+    def test_duplex_hybrid_samples_controls_and_chooses_words_greedily(self):
+        speech_config = self._config(raon.RaonSpeechConfig)
+        config = raon.RaonDuplexConfig.from_speech_config(
+            speech_config,
+            state=raon.DuplexStateConfig(
+                use_duplex_end_pad=True, use_sil_token=True, sequence_mode="uta"
+            ),
+        )
+        model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+        controls = raon.DuplexMachineState(
+            raon.DuplexPhase.SIL,
+            [raon.AUDIO_INPUT_PLACEHOLDER_ID, raon.AUDIO_OUTPUT_PLACEHOLDER_ID],
+        )
+        words = raon.DuplexMachineState(
+            raon.DuplexPhase.SPEECH,
+            [
+                raon.AUDIO_INPUT_PLACEHOLDER_ID,
+                raon.AUDIO_OUTPUT_END_PAD_ID,
+                raon.AUDIO_OUTPUT_PLACEHOLDER_ID,
+            ],
+        )
+        logits = mx.zeros((1, 2, config.thinker.vocab_size))
+        logits = logits.at[0, 0, 42].add(4)
+        sampled = []
+
+        def sampler(values):
+            sampled.append(values.shape)
+            return raon.AUDIO_OUTPUT_END_PAD_ID
+
+        self.assertEqual(
+            model._select_text_token(logits, controls, sampler, hybrid_text=True),
+            raon.AUDIO_OUTPUT_END_PAD_ID,
+        )
+        self.assertEqual(
+            model._select_text_token(logits, words, sampler, hybrid_text=True), 42
+        )
+        self.assertEqual(sampled, [(1, config.thinker.vocab_size)])
+
+    def test_duplex_sparse_control_projection_matches_legal_dense_rows(self):
+        speech_config = self._config(raon.RaonSpeechConfig)
+        config = raon.RaonDuplexConfig.from_speech_config(
+            speech_config,
+            state=raon.DuplexStateConfig(
+                use_duplex_end_pad=True, use_sil_token=True, sequence_mode="uta"
+            ),
+        )
+        model = raon.RaonDuplexModel(config, codec=_FakeCodec(8))
+        state = raon.DuplexMachineState(
+            raon.DuplexPhase.SIL,
+            [raon.AUDIO_INPUT_PLACEHOLDER_ID, raon.AUDIO_OUTPUT_PLACEHOLDER_ID],
+        )
+        hidden = mx.ones((1, 3, config.thinker.hidden_size))
+        projected = model._project_duplex_text(hidden, state)
+        dense = model.lm_head(hidden[:, -2:-1, :])
+        self.assertEqual(projected.shape, (1, 3, config.thinker.vocab_size))
+        for token_id in (raon.AUDIO_OUTPUT_SIL_ID, raon.AUDIO_OUTPUT_END_PAD_ID):
+            self.assertAlmostEqual(
+                float(projected[0, -2, token_id]),
+                float(dense[0, 0, token_id]),
+                places=4,
+            )
+        self.assertEqual(float(projected[0, -2, 42]), 0.0)
+
     def test_duplex_frame_advances_across_empty_streaming_embedding(self):
         speech_config = self._config(raon.RaonSpeechConfig)
         config = raon.RaonDuplexConfig.from_speech_config(

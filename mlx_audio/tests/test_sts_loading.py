@@ -339,3 +339,47 @@ def test_raon_name_does_not_override_generic_qwen_config(monkeypatch):
     )
     with pytest.raises(ValueError, match="'qwen3'.*not supported"):
         sts_utils.load("local-raon-qwen3")
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+@pytest.mark.parametrize("weight_option", ["weight_files", "weight_format"])
+def test_raon_sts_load_keeps_weight_options_out_of_config_resolution(
+    monkeypatch, tmp_path, as_string, weight_option
+):
+    import json
+
+    import mlx_audio.sts as sts
+    import mlx_audio.sts.models.raon as raon
+
+    model_path = tmp_path / "opaque"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(json.dumps({"model_type": "raon"}))
+    sentinel = object()
+    calls = []
+
+    class Stub:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            calls.append((path, kwargs))
+            return sentinel
+
+    monkeypatch.setattr(raon, "RaonTTSModel", Stub)
+    value = (
+        [model_path / "model.safetensors"]
+        if weight_option == "weight_files" else "safetensors"
+    )
+    result = sts.load(
+        str(model_path) if as_string else model_path, **{weight_option: value}
+    )
+
+    assert result is sentinel
+    assert calls == [
+        (
+            str(model_path),
+            {
+                "revision": None,
+                "weight_files": value if weight_option == "weight_files" else None,
+                "weight_format": value if weight_option == "weight_format" else None,
+            },
+        )
+    ]
