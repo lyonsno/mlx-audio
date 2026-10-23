@@ -294,6 +294,14 @@ def session_options(args, greedy_sampler=None):
     )
 
 
+def configure_unused_cache(mx):
+    previous = mx.set_cache_limit(0)
+    effective = mx.set_cache_limit(0)
+    if effective != 0:
+        raise ValueError(f"MLX unused-buffer cache policy was not applied: {effective}")
+    return {"previous_bytes": previous, "effective_bytes": effective}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
@@ -323,6 +331,7 @@ def main():
         write_status(status_path, state="loading", model=args.model)
         if mx.default_device() != mx.gpu:
             raise ValueError("The live RAON demo requires the MLX Metal GPU route")
+        cache_policy = configure_unused_cache(mx)
         mx.random.seed(17)
         model = RaonDuplexModel.from_pretrained(args.model)
         if not model.config.state.use_duplex_end_pad:
@@ -344,6 +353,7 @@ def main():
                     "device": str(mx.default_device()),
                     "seed": 17,
                     "thinker_quantization": {"bits": 8, "group_size": 64},
+                    "unused_buffer_cache_limit": cache_policy,
                     "text_policy": (
                         "argmax" if args.greedy_text else
                         "sampled" if args.sampled_text else

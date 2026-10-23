@@ -68,6 +68,26 @@ class TestLiveAudioExchange(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "greedy"):
             self.demo.session_options(args)
 
+    def test_live_cache_policy_is_applied_and_verified(self):
+        class Cache:
+            limit = 128
+
+            def set_cache_limit(self, value):
+                previous, self.limit = self.limit, value
+                return previous
+
+        cache = Cache()
+        self.assertEqual(
+            self.demo.configure_unused_cache(cache),
+            {"previous_bytes": 128, "effective_bytes": 0},
+        )
+        self.assertEqual(cache.limit, 0)
+
+    def test_ignored_live_cache_policy_fails_loud(self):
+        cache = SimpleNamespace(set_cache_limit=lambda _: 128)
+        with self.assertRaisesRegex(ValueError, "cache"):
+            self.demo.configure_unused_cache(cache)
+
     def test_partial_output_and_multiple_chunks_preserve_order(self):
         exchange = self.demo.AudioExchange()
         exchange.push_audio(np.array([1, 2, 3], dtype=np.float32))

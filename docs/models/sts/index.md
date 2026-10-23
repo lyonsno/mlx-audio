@@ -370,7 +370,7 @@ python examples/raon_live.py \
   --output-dir /path/to/new-raon-session
 ```
 
-The example quantizes the thinker to 8-bit, retains an FP32 text head, and by default samples structural conversation controls while choosing ordinary text greedily. `--greedy-text` and `--sampled-text` select the simpler comparison policies. The microphone stays closed during loading and warmup; conversation starts only after the terminal prompt. Use headphones because the example does not perform acoustic echo cancellation. Live cadence depends on available Metal compute and concurrent workloads.
+The example quantizes the thinker to 8-bit, retains an FP32 text head, and by default samples structural conversation controls while choosing ordinary text greedily. It sets the MLX unused-buffer cache limit to zero and records the effective setting; this does not cap model weights or active memory. `--greedy-text` and `--sampled-text` select the simpler comparison policies. The microphone stays closed during loading and warmup; conversation starts only after the terminal prompt. Use headphones because the example does not perform acoustic echo cancellation. Live cadence depends on available Metal compute and concurrent workloads.
 
 !!! warning "Checkpoint license"
     The KRAFTON checkpoint is distributed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Review its non-commercial-use terms before deploying or redistributing the weights.
