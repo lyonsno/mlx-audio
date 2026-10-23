@@ -366,7 +366,8 @@ def test_raon_sts_load_keeps_weight_options_out_of_config_resolution(
     monkeypatch.setattr(raon, "RaonTTSModel", Stub)
     value = (
         [model_path / "model.safetensors"]
-        if weight_option == "weight_files" else "safetensors"
+        if weight_option == "weight_files"
+        else "safetensors"
     )
     result = sts.load(
         str(model_path) if as_string else model_path, **{weight_option: value}

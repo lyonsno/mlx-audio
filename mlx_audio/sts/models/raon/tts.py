@@ -1070,7 +1070,8 @@ class RaonDuplexModel(RaonSpeechModel):
             onsets.add(cfg.duplex_bc_token_id)
         if context in onsets or (
             context is not None
-            and context not in (
+            and context
+            not in (
                 _BLOCKED_STRUCTURAL
                 | onsets
                 | {cfg.duplex_pad_token_id, cfg.duplex_sil_token_id}
@@ -1095,10 +1096,14 @@ class RaonDuplexModel(RaonSpeechModel):
         else:
             indices = mx.array(ids, dtype=mx.int32)
             scores = prediction @ self.lm_head.weight[indices].T
-            selected = mx.zeros(
-                (normalized.shape[0], 1, self.config.thinker.vocab_size),
-                dtype=scores.dtype,
-            ).at[:, :, indices].add(scores)
+            selected = (
+                mx.zeros(
+                    (normalized.shape[0], 1, self.config.thinker.vocab_size),
+                    dtype=scores.dtype,
+                )
+                .at[:, :, indices]
+                .add(scores)
+            )
         before = mx.zeros(
             (normalized.shape[0], normalized.shape[1] - 2, selected.shape[-1]),
             dtype=selected.dtype,

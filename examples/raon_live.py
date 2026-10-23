@@ -355,14 +355,19 @@ def main():
                     "thinker_quantization": {"bits": 8, "group_size": 64},
                     "unused_buffer_cache_limit": cache_policy,
                     "text_policy": (
-                        "argmax" if args.greedy_text else
-                        "sampled" if args.sampled_text else
-                        "sampled-controls-greedy-words"
+                        "argmax"
+                        if args.greedy_text
+                        else (
+                            "sampled"
+                            if args.sampled_text
+                            else "sampled-controls-greedy-words"
+                        )
                     ),
                     "text_head_dtype": str(model.lm_head.weight.dtype),
                     "text_projection": (
                         "prediction-position-control-sparse"
-                        if options["hybrid_text"] else "full"
+                        if options["hybrid_text"]
+                        else "full"
                     ),
                     "acoustic_sampling": {
                         "temperature": args.temperature,
@@ -378,8 +383,9 @@ def main():
             + "\n"
         )
         text_policy = (
-            "argmax" if args.greedy_text else
-            "sampled" if args.sampled_text else "hybrid"
+            "argmax"
+            if args.greedy_text
+            else "sampled" if args.sampled_text else "hybrid"
         )
         print(
             f"Text: {text_policy} | "
