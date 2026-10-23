@@ -155,7 +155,9 @@ def load_model(
     if model_type == "raon":
         from mlx_audio.sts.models import raon
 
-        source_type = model_type_from_config(load_config(model_path, **resolution_kwargs))
+        source_type = model_type_from_config(
+            load_config(model_path, **resolution_kwargs)
+        )
         if source_type == "raon":
             model_class = raon.RaonTTSModel
         elif source_type == "raon_duplex":

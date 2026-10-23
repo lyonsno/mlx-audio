@@ -47,8 +47,11 @@ class TestLiveAudioExchange(unittest.TestCase):
 
     def test_sampled_text_does_not_install_a_greedy_override(self):
         args = SimpleNamespace(
-            greedy_text=False, sampled_text=True,
-            temperature=0.9, top_k=66, top_p=0.95,
+            greedy_text=False,
+            sampled_text=True,
+            temperature=0.9,
+            top_k=66,
+            top_p=0.95,
         )
         options = self.demo.session_options(args)
         self.assertIsNone(options["text_sampler"])
