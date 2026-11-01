@@ -851,7 +851,9 @@ class RaonTTSModel(nn.Module):
         revision: Optional[str] = None,
         weight_files: Optional[Sequence[Union[str, Path, BinaryIO]]] = None,
         weight_format: Optional[str] = None,
+        lazy: bool = False,
     ) -> "RaonTTSModel":
+        """Load source weights; ``lazy`` defers full evaluation for transformations."""
         model_path = get_model_path(path_or_repo, revision=revision)
         with open(Path(model_path) / "config.json", encoding="utf-8") as handle:
             config = cls._load_config(json.load(handle))
@@ -863,7 +865,8 @@ class RaonTTSModel(nn.Module):
                 weight_format=weight_format,
             )
         )
-        mx.eval(model.parameters())
+        if not lazy:
+            mx.eval(model.parameters())
 
         from transformers import AutoTokenizer
 

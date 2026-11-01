@@ -718,6 +718,26 @@ class TestRaonTextToSpeech(unittest.TestCase):
         )
         load_source.assert_called_once_with({})
 
+    def test_from_pretrained_lazy_preserves_admission_without_full_evaluation(self):
+        _, model_type, _ = self._types()
+        for lazy in (True, False):
+            with self.subTest(lazy=lazy), TemporaryDirectory() as directory:
+                model_path = Path(directory)
+                (model_path / "config.json").write_text("{}", encoding="utf-8")
+                with (
+                    patch.object(model_type, "_load_config", return_value=self._config()),
+                    patch.object(model_type, "load_source_weights") as admit,
+                    patch("mlx_audio.sts.models.raon.tts.load_weights", return_value={}),
+                    patch("mlx_audio.sts.models.raon.tts.mx.eval") as evaluate,
+                    patch("transformers.AutoTokenizer.from_pretrained", return_value=None),
+                ):
+                    # Codec construction has its own small initialization evals.
+                    admit.side_effect = lambda weights: evaluate.reset_mock()
+                    model = model_type.from_pretrained(str(model_path), lazy=lazy)
+                admit.assert_called_once_with({})
+                self.assertEqual(evaluate.call_count, 0 if lazy else 1)
+                self.assertFalse(model.training)
+
     def test_source_classification_rejects_unknown_root_and_supported_family(self):
         _, model_type, _ = self._types()
         model = model_type(self._config(), codec=_FakeCodec(8))
