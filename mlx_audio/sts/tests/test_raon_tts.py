@@ -725,11 +725,17 @@ class TestRaonTextToSpeech(unittest.TestCase):
                 model_path = Path(directory)
                 (model_path / "config.json").write_text("{}", encoding="utf-8")
                 with (
-                    patch.object(model_type, "_load_config", return_value=self._config()),
+                    patch.object(
+                        model_type, "_load_config", return_value=self._config()
+                    ),
                     patch.object(model_type, "load_source_weights") as admit,
-                    patch("mlx_audio.sts.models.raon.tts.load_weights", return_value={}),
+                    patch(
+                        "mlx_audio.sts.models.raon.tts.load_weights", return_value={}
+                    ),
                     patch("mlx_audio.sts.models.raon.tts.mx.eval") as evaluate,
-                    patch("transformers.AutoTokenizer.from_pretrained", return_value=None),
+                    patch(
+                        "transformers.AutoTokenizer.from_pretrained", return_value=None
+                    ),
                 ):
                     # Codec construction has its own small initialization evals.
                     admit.side_effect = lambda weights: evaluate.reset_mock()
